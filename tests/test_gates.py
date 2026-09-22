@@ -302,6 +302,101 @@ class ScaffoldAndVerify(unittest.TestCase):
             publisher.publish(publish_args(repo=str(target)))
 
 
+class VisibilityTest(unittest.TestCase):
+    """生成的仓库推上去必须是公开的：下游容器要能匿名 clone。
+
+    不联网：把 gh 的查询与改动两处调用替换掉，只验逻辑。
+    """
+
+    def setUp(self) -> None:
+        self.edits: list[tuple[str, str]] = []
+        self.original_read = publisher.gh_repo_visibility
+        self.original_edit = publisher.edit_repo_visibility
+
+    def tearDown(self) -> None:
+        publisher.gh_repo_visibility = self.original_read
+        publisher.edit_repo_visibility = self.original_edit
+
+    def fake_repo(self, states: list[str | None]) -> None:
+        """按顺序返回可见性：第一次读、改动后再读。"""
+        queue = list(states)
+
+        def read(full_name: str) -> str | None:
+            return queue.pop(0) if queue else None
+
+        def edit(full_name: str, visibility: str):
+            self.edits.append((full_name, visibility))
+            return subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="", stderr="")
+
+        publisher.gh_repo_visibility = read
+        publisher.edit_repo_visibility = edit
+
+    def test_already_public_needs_no_change(self):
+        self.fake_repo(["public"])
+        result = publisher.ensure_visibility("me/repo", "public", execute=True)
+        self.assertEqual(result["before"], "public")
+        self.assertEqual(result["after"], "public")
+        self.assertFalse(result["fixed"])
+        self.assertEqual(self.edits, [])
+        self.assertEqual(result["problems"], [])
+
+    def test_private_repo_is_switched_to_public(self):
+        self.fake_repo(["private", "public"])
+        result = publisher.ensure_visibility("me/repo", "public", execute=True)
+        self.assertTrue(result["fixed"])
+        self.assertEqual(result["after"], "public")
+        self.assertEqual(self.edits, [("me/repo", "public")])
+        self.assertEqual(result["problems"], [])
+
+    def test_dry_run_only_plans_the_change(self):
+        self.fake_repo(["private"])
+        result = publisher.ensure_visibility("me/repo", "public", execute=False)
+        self.assertTrue(result["will_fix"])
+        self.assertFalse(result["fixed"])
+        self.assertEqual(self.edits, [], "dry-run 不许真的改远端")
+        self.assertIn("me/repo", result["planned_command"])
+        self.assertIn("--visibility", result["planned_command"])
+
+    def test_failed_switch_is_reported(self):
+        self.fake_repo(["private", "private"])
+        result = publisher.ensure_visibility("me/repo", "public", execute=True)
+        self.assertFalse(result["fixed"])
+        self.assertTrue(result["problems"], "改完还是 private 必须报出来")
+        self.assertIn("gh repo edit me/repo --visibility public", result["problems"][0])
+
+    def test_unreadable_visibility_does_not_block(self):
+        """读不到可见性（网络/权限）时不能把整次推送拦死，标成 None 放行。"""
+        self.fake_repo([None])
+        result = publisher.ensure_visibility("me/repo", "public", execute=True)
+        self.assertIsNone(result["before"])
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(self.edits, [])
+
+    def test_publish_plans_the_visibility_fix_in_dry_run(self):
+        """接进 publish 之后，dry-run 的计划里要出现 gh repo edit。"""
+        repo = Path(tempfile.mkdtemp(prefix="cc-repo-create-vis-")) / "app"
+        try:
+            generate(repo, "--git-init")
+            original_exists = publisher.repo_exists
+            original_head = publisher.remote_head
+            publisher.repo_exists = lambda full_name: True
+            publisher.remote_head = lambda url, branch, repo, allow_missing=False: ""
+            self.fake_repo(["private", "private"])
+            try:
+                report = publisher.publish(publish_args(
+                    repo=str(repo), owner="me", name="app", visibility="public",
+                    skip_verify=True, execute=False))
+            finally:
+                publisher.repo_exists = original_exists
+                publisher.remote_head = original_head
+            self.assertTrue(report["visibility_will_fix"])
+            commands = [" ".join(item) for item in report["planned_commands"]]
+            self.assertTrue(any("gh repo edit me/app --visibility public" in item
+                                for item in commands), commands)
+        finally:
+            shutil.rmtree(repo.parent, ignore_errors=True)
+
+
 class NumberingTest(unittest.TestCase):
     """项目编号：<前缀 2~4 字母><5 位数>，首位是 1；本地已有的往后排，GitHub 上占用的也往后排。"""
 

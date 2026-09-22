@@ -55,6 +55,11 @@ python3 scripts/publish_github.py --repo <repo> --execute --confirm PUBLISH
 静态验收通过；**远端 `main` 上有本地没有的提交时拒推，脚本不做强推**。
 分支已是最新时报 `up-to-date`，不重复推。推完回读远端 `main` 的 SHA 与本地 HEAD 比对。
 
+**生成的仓库必须是 public**（`--visibility` 默认 `public`）：下游容器要能匿名 clone，
+private 会卡住整条出题链路。脚本推送前后各读一次真实可见性，不是 private 就改成 public，
+并把 `visibility_before` / `visibility_after` / `visibility_fixed` 写进报告；改不动就报错。
+这是「生成的业务仓库」的口径——skill 自己的代码仓不受这条约束，按需要单独设。
+
 凭据：默认走 `gh`（`gh auth token`），也认 `GH_TOKEN` / `GITHUB_TOKEN`。
 token 只以一次性 `git -c http.extraHeader=...` 传参，**不写进 `.git/config`、不打印**；
 `origin` 始终指向不带 token 的 `https://github.com/<owner>/<name>.git`。

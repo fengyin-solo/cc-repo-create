@@ -121,6 +121,64 @@ def repo_exists(full_name: str) -> bool:
     return run([gh_binary(), "repo", "view", full_name]).returncode == 0
 
 
+def gh_repo_visibility(full_name: str) -> str | None:
+    """读远端仓库的真实可见性；读不到（网络/权限）返回 None。"""
+    result = run([gh_binary(), "repo", "view", full_name, "--json", "visibility"])
+    if result.returncode != 0:
+        return None
+    try:
+        value = json.loads(result.stdout).get("visibility") or ""
+    except json.JSONDecodeError:
+        return None
+    return str(value).strip().lower() or None
+
+
+def edit_repo_visibility(full_name: str, visibility: str) -> subprocess.CompletedProcess[str]:
+    return run([gh_binary(), "repo", "edit", full_name, "--visibility", visibility,
+                "--accept-visibility-change-consequences"])
+
+
+def ensure_visibility(full_name: str, visibility: str, *, execute: bool) -> dict[str, object]:
+    """核对远端仓库可见性，必要时改成要求的值。
+
+    生成的仓库必须是公开的：下游容器要能匿名 clone，private 会直接卡住出题链路。
+    改动不做无声操作——前后值都写进返回值，`will_fix` 表示这一轮只计划、没执行。
+    """
+    result: dict[str, object] = {"problems": [], "will_fix": False, "fixed": False}
+    before = gh_repo_visibility(full_name)
+    result["before"] = before
+    if before is None:
+        result["after"] = None
+        return result
+    if before == visibility:
+        result["after"] = before
+        return result
+
+    result["planned_command"] = ["gh", "repo", "edit", full_name, "--visibility", visibility,
+                                 "--accept-visibility-change-consequences"]
+    if not execute:
+        result["after"] = visibility
+        result["will_fix"] = True
+        return result
+
+    edited = edit_repo_visibility(full_name, visibility)
+    if edited.returncode != 0:
+        message = edited.stderr.strip() or edited.stdout.strip() or "gh repo edit failed"
+        result["after"] = gh_repo_visibility(full_name)
+        result["problems"].append(f"把 {full_name} 改成 {visibility} 失败：{message}")
+        return result
+    after = gh_repo_visibility(full_name)
+    result["after"] = after
+    # fixed 表示「现在真的是要求的可见性了」，不是「改动命令返回 0」
+    result["fixed"] = after == visibility
+    if after != visibility:
+        result["problems"].append(
+            f"{full_name} 当前可见性是 {after}，要求是 {visibility}；"
+            f"手工改：gh repo edit {full_name} --visibility {visibility} "
+            "--accept-visibility-change-consequences")
+    return result
+
+
 def resolve_owner(explicit: str | None) -> str:
     if explicit:
         return explicit
@@ -214,6 +272,18 @@ def publish(args) -> dict[str, object]:
     report["remote_url"] = url
     report["repo_url"] = f"https://github.com/{full_name}" if full_name else url
 
+    # 生成的仓库必须是公开的：下游（GSB 容器）要能匿名 clone，private 会直接卡住出题链路。
+    # 所以这里核对真实可见性，和请求的不一致就改过来，并把前后值都写进报告，不做无声修改。
+    if full_name and remote_ready:
+        visibility = ensure_visibility(full_name, args.visibility, execute=args.execute)
+        report["visibility_before"] = visibility.get("before")
+        report["visibility_after"] = visibility.get("after")
+        report["visibility_will_fix"] = visibility.get("will_fix")
+        report["visibility_fixed"] = visibility.get("fixed")
+        if visibility.get("planned_command"):
+            report["planned_commands"].append(redact(visibility["planned_command"]))
+        problems.extend(visibility["problems"])
+
     # 远端 main 与本地的关系：只允许首次推送或快进，绝不强推
     if remote_ready:
         existing_remote_head = remote_head(url, branch, repo, allow_missing=bool(args.remote_url))
@@ -274,7 +344,9 @@ def main() -> int:
     parser.add_argument("--branch", default=DEFAULT_BRANCH)
     parser.add_argument("--owner", help="GitHub owner，默认取 gh 当前登录账号")
     parser.add_argument("--name", help="仓库名，默认取仓库目录名")
-    parser.add_argument("--visibility", choices=["public", "private", "internal"], default="public")
+    parser.add_argument("--visibility", choices=["public", "private", "internal"], default="public",
+                        help="仓库可见性，默认 public。生成的仓库必须是公开的——"
+                             "下游容器要能匿名 clone；发现远端是 private 会自动改成 public 并记录")
     parser.add_argument("--description", help="仓库描述")
     parser.add_argument("--remote-url", help="非 GitHub 远端（例如 GitLab / 本地裸仓库）：跳过 gh 建仓直接推")
     parser.add_argument("--skip-verify", action="store_true",

@@ -55,6 +55,9 @@ python3 scripts/probe_startup.py --repo <仓库> --clean-clone --build
 python3 scripts/publish_github.py --repo <仓库>
 ```
 
+生成的仓库**默认建成 public**（下游容器要能匿名 clone）。脚本不会只靠「建的时候传了 public」
+就算数：推送前后各读一次真实可见性，发现还是 private 就改成 public 并记录前后值，改不动直接报错。
+
 ### 项目编号
 
 `--parent` 模式下，目录名与仓库名都取项目编号：`<前缀 2~4 字母><5 位数>`，5 位数首位固定是 1。

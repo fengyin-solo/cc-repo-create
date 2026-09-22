@@ -99,20 +99,28 @@ Java 后端在没装 JDK 17 + Maven 的机器上会明确报「无法真启动�
 ```bash
 python3 <skill>/scripts/publish_github.py --repo /path/to/repo
 python3 <skill>/scripts/publish_github.py --repo /path/to/repo \
-  --owner <账号或组织> --name <仓库名> --visibility private \
+  --owner <账号或组织> --name <仓库名> --visibility public \
   --execute --confirm PUBLISH
 ```
 
 它会：校验仓库是 git 仓库、当前分支是 `main`、工作区干净、静态验收通过；解析 owner
 （默认取 `gh` 当前登录账号）；仓库不存在就 `gh repo create` 建一个；把 `origin` 设成
-**不带 token** 的 `https://github.com/<owner>/<name>.git`；推送 `main:main`；
-最后回读远端 `main` 的 SHA 和本地 HEAD 比对。
+**不带 token** 的 `https://github.com/<owner>/<name>.git`；**核对可见性并确保是 public**；
+推送 `main:main`；最后回读远端 `main` 的 SHA 和本地 HEAD 比对。
+
+**生成的仓库必须是 public**（`--visibility` 默认就是 `public`）：下游容器要能匿名 clone，
+private 会直接把出题链路卡住。脚本不靠「建的时候传了 public」就算数，而是推送前后各读一次
+真实可见性：发现远端还是 private，就用
+`gh repo edit <owner>/<name> --visibility public --accept-visibility-change-consequences`
+改过来，并把 `visibility_before` / `visibility_after` / `visibility_fixed` 写进报告；
+改完仍然不是 public 就直接报错，不当作成功。
 
 安全边界（都实测过）：
 
 - 工作区有未提交改动 → 拒推；
 - 远端 `main` 上有本地没有的提交（分叉）→ 拒推，**脚本不做强推**；
 - 远端已是最新 → 报 `up-to-date`，不重复推；
+- 生成的仓库可见性不是 public → 自动改成 public 并在报告里留前后值；改不动就报错；
 - token 只以一次性 `git -c http.extraHeader=...` 传参，不写进 `.git/config`，也不打印；
 - 远端不是 GitHub（例如 GitLab 或本地裸仓库）→ 用 `--remote-url` 直接推，跳过 `gh` 建仓。
 
@@ -123,6 +131,7 @@ python3 <skill>/scripts/publish_github.py --repo /path/to/repo \
   且克隆里那条「前端生产构建通过」也是 `true`；
 - 依赖目录已被 `.gitignore` 命中，且没进 `git status --porcelain`；
 - 推完之后 `publish_github.py` 报 `ok: true`，远端 `main` 的 SHA 等于本地 HEAD。
+- 生成出来的仓库是 **public**（报告里 `visibility_after` 是 `public`）。
 
 ## 项目编号（默认 cc10001 起，前缀可换）
 
@@ -206,13 +215,15 @@ python3 <skill>/scripts/verify_repo.py --rules-drift <任一份外部出题闸�
 python3 -m unittest discover -s <skill>/tests -v
 ```
 
-29 条用例：生成出来的仓库要过全部闸门；把 `open: false` 改成 `true`、删掉 `.gitignore`、
+35 条用例：生成出来的仓库要过全部闸门；把 `open: false` 改成 `true`、删掉 `.gitignore`、
 塞一个硬编码密钥、写死一个本机绝对路径、漏声明一个依赖、把 `true` 当 Python 变量用、
 把模块砍到 3 个、把主体砍到 2 个，闸门都必须拦下；依赖目录落地后必须被 `git check-ignore`
 命中；React + Java 变体也要过；推送链路要覆盖「dry-run 不碰远端」「首次推 main」
 「重复推是 up-to-date」「新提交快进」「远端分叉拒推」「脏工作区拒推」「不是 git 仓库报错」。
 编号链路要覆盖「空目录从 10001 起」「按已有编号往后排」「换前缀不重置序号」「大小写保持」
 「GitHub 占用时往后跳」「查不了 GitHub 时回退本地序号」「显式编号冲突就报错」「编号封顶」。
+可见性链路要覆盖「已经是 public 就不动」「private 会被改成 public」「dry-run 只计划不改」
+「改完还是 private 要报错」「读不到可见性不阻塞」。
 
 改了 `scaffold_repo.py` / `verify_repo.py` / `repo_rules.py` / `publish_github.py`
 先跑它，再动真实仓库。
