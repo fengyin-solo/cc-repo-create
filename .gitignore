@@ -1,0 +1,19 @@
+# Python 运行时产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# 本 skill 的探针日志（默认写在被验仓库的父目录下，兜底也忽略一份）
+.probe-logs/
+.repo-probe-logs/
+
+# 操作系统与编辑器
+.DS_Store
+.idea/
+.vscode/
+*.swp
