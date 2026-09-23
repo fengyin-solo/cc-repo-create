@@ -2,7 +2,7 @@
 
 跑法：
 
-    python3 -m unittest discover -s /Users/fengyin/.codex/skills/cc-repo-create/tests -v
+    python3 -m unittest discover -s ~/.kunlunxiaozhi/skills/cc-repo-create/tests -v
 
 只做生成与静态验收，不装依赖、不起服务（那两步由 scripts/probe_startup.py 负责）。
 """

@@ -9,7 +9,17 @@ description: "生成可直接出题、并且能直接交付的全栈代码仓库
 每个业务模块都同时有前端页面、后端接口和业务规则三处代码，主体数、行数、需求模式
 覆盖度都按出题容量算好，不用生成完再回头补。
 
-`<skill>` 指本 skill 所在目录。
+`<skill>` 指本 skill 所在目录（本机为 `~/.kunlunxiaozhi/skills/cc-repo-create`）。
+
+## 本地环境（先读这个）
+
+本机已适配并实测，细节见 [references/local_environment.md](references/local_environment.md)：
+
+- `python3` → 3.13.12（PATH 上的隔离运行时），`node` v22.22.2、`npm` 10.9.7、`git` 2.50.1 均在 PATH 上，直接写命令名即可，**不要硬编码 `/Users/...` 绝对路径**。
+- `gh` 2.93.0 已登录账号 `fengyin-solo`，推 GitHub 时默认 owner 自动取到它。
+- **本机没有 JDK 17 / Maven**：Java 后端（Spring Boot）只能生成、**无法真启动验收**。本机出题与交付请统一用 `--backend python`（FastAPI）；Java 版的 G8 一律按未验证处理。
+- 命令里的路径**带中文或空格必须加双引号**（本机工作目录就含中文和空格）。
+- 真启动探针会联网（`npm install` + `pip install`），离线时 G8 会失败，属环境问题不是仓库问题。
 
 ## 什么时候用
 
