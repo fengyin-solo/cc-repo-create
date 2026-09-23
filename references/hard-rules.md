@@ -10,7 +10,7 @@
 | G3 忽略 | 根目录 `.gitignore` 覆盖依赖 / 缓存 / 构建产物 / 日志 / 环境文件 | `verify_repo.py` |
 | G4 体量 | 源码行数 >= 2000 行（不含依赖目录、构建产物、锁文件） | `verify_repo.py` |
 | G5 容量 | 出题容量 >= 30 条 | `verify_repo.py` |
-| G6 合规 | 不是禁用题型仓库，无密钥、无超大文件、无违规业务域 | `verify_repo.py` |
+| G6 合规 | 不是禁用题型仓库，无密钥、无超大文件、无违规业务域，且题域不命中 0731 严禁出题清单 | `verify_repo.py` |
 | G7 环境 | 基础环境自洽：Python 全量可编译、后端入口能 import、依赖都声明、没有写死本机路径 | `verify_repo.py` |
 | G8 真启动 | 干净克隆里后端起得来、接口有数据、前端页面有挂载点、前端代理到后端通、生产构建通过 | `probe_startup.py` |
 
@@ -65,6 +65,41 @@ token 只以一次性 `git -c http.extraHeader=...` 传参，**不写进 `.git/c
 `origin` 始终指向不带 token 的 `https://github.com/<owner>/<name>.git`。
 远端不是 GitHub 时用 `--remote-url` 直接推。
 
+## 严禁题域（与禁用题型并列，但判废逻辑不同）
+
+`禁用题型` 说的是仓库**长不成**那种样子，补业务模块就能救；
+`严禁题域` 说的是**这个方向根本不许出题**——仓库做得再合规、容量再够，命中就是废题。
+
+清单权威源是 `gsb-creator/references/0731_方案规则.md` 第 6 节「严禁出题清单（命中即废题）」，
+本 skill 的冻结快照在 `scripts/repo_rules.py` 的 `BANNED_TOPIC_KEYWORDS`（抄写日期 2026-09-23，
+与 `gsb-creator/scripts/check_repo.py` 的 `BANNED_KEYWORDS` 逐字对齐）与
+`BANNED_TOPIC_EXTRA_TERMS`（0731 原文里点名、但关键词表漏掉的题域级词）。四类：
+
+- 🎮 游戏与图形：贪吃蛇、打砖块、俄罗斯方块、坦克大战及变种；粒子/物理模拟；塔防/2D 解谜/潜行/平台跳跃；喂食小动物；记忆翻牌/连连看；五子棋等棋类；2048；扫雷；打地鼠
+- 🖥️ 本地/桌面工具：命令行 CLI、代码片段管理器、批量重命名、截图标注、文件管理/同步、书签、密码管理器
+- 🏢 平台/业务系统：电商购物车/订单、RBAC 权限后台、仓库库存、投票问卷、考勤 OA、图书借阅、博客 CMS、医院挂号/问诊、外卖点餐、CRM、IM 私信、拍卖、停车场、工单客服、商品+Excel 导入、积分商城、XXX 预约系统
+- 📊 数据可视化/前端页面：报表统计、Streamlit、CSV 看板、记账、健康健身、菜谱、天气、番茄钟、习惯打卡、音乐播放器、旅行日记、观影记录
+
+**拦在两处，都不给绕过参数：**
+
+| 位置 | 语料 | 行为 |
+|---|---|---|
+| `scaffold_repo.py` 生成前（`load_spec` → `scan_spec_topics`） | spec 的 `app_name` / `app_slug` / `app_desc` + 每模块 `key` / `name` / `entity` / `desc` / `fields` / `statuses` / `actions` / `action_targets` / `metrics` | 拒绝生成，逐条点名「哪个词出现在哪个字段」，不落任何目录 |
+| `verify_repo.py` 的 `check_forbidden`（G6） | 仓库目录名 + README + 全部文本源码 | 判 G6 不通过，`banned_topic_hits` 带文件路径 |
+
+匹配口径是**大小写不敏感的子串匹配**（与下游 `check_repo.py` 的 `kw in text` 一致），
+不做分词、不做词边界判断。仓库侧比下游严一档：下游只读「仓库名 + README」，
+这里连源码一起扫——生成的 README 里本来就有一张带模块 key 与业务字段的模块表，
+源码命中基本等于 README 也会命中。
+
+`BANNED_TOPIC_EXTRA_TERMS` 的准入规则：候选词必须先过 `examples/` 里的默认 spec 与两个
+真实 spec 的回归，**误伤的一律不收**。已经明确排除的有 `cli` / `im`（子串炸弹，会命中
+`client` / `import`）与 `看板` / `报表` / `导入` / `同步` / `文件`（是需求模式里的正常词，
+且出厂 spec 自己就有「运营看板」模块）。
+
+**换题域，不要改字眼。** 把「库存」写成「在库」绕过关键词，题域还是那个题域，
+下游换个口径照样判废。
+
 ## 禁用题型
 
 任务类型一共六种：`代码生成` `缺陷修复` `功能迭代` `代码重构` `工程化` `代码理解`。
@@ -97,7 +132,7 @@ token 只以一次性 `git -c http.extraHeader=...` 传参，**不写进 `.git/c
 | 可用需求模式 | 12 | 需求模式词典共 13 类，去掉禁用的 `代码理解` |
 
 所以：`每模式上限 3` 时，模式席位 = 12 × 3 = 36；只要主体数 >= 16，
-容量 = min(35, 主体数 × 2, 36) >= 32，稳稳过 30。默认 spec 实测 29 个主体，容量 35。
+容量 = min(35, 主体数 × 2, 36) >= 32，稳稳过 30。默认 spec 实测 31 个主体，容量 35。
 
 ### 30 条这一条怎么成立
 
@@ -144,19 +179,28 @@ token 只以一次性 `git -c http.extraHeader=...` 传参，**不写进 `.git/c
 
 ## 规则同步
 
-`repo_rules.py` 是出题闸门口径的**冻结快照**（抄写日期 2026-09-22），本 skill 靠它自给自足。
+`repo_rules.py` 是出题闸门口径的**冻结快照**（容量/主体口径抄写日期 2026-09-22，
+严禁题域清单抄写日期 2026-09-23），本 skill 靠它自给自足。
 如果目标机器上已经有出题闸门脚本，可以顺手比对一次，别让快照悄悄过期：
 
 ```bash
-python3 scripts/verify_repo.py --rules-drift <任一份外部出题闸门脚本的路径>
+# 容量/主体/需求模式口径，指向 check_repo_theme.py
+python3 scripts/verify_repo.py --rules-drift <check_repo_theme.py 的路径>
+
+# 严禁题域清单，指向 check_repo.py
+python3 scripts/verify_repo.py --banned-drift <check_repo.py 的路径>
 ```
 
-这一步是可选的：没有这份脚本时本 skill 照常独立工作。比对项是常量级相等，
-所以两边口径只要有一处不同就会报出来。
+两步都是可选的：没有对应脚本时本 skill 照常独立工作。比对项是常量级相等，
+所以两边口径只要有一处不同就会报出来。`--rules-drift` 里严禁清单那一项是**可选比对**：
+对方脚本没有 `BANNED_TOPIC_KEYWORDS` / `BANNED_KEYWORDS` 时静默跳过
+（老的 `check_repo_theme.py` 不带这份清单，不该因此判失败），输出里以
+`their_banned_keywords: "absent"` 体现。
 
 输出 `ok: false` 时按上面列的常量名逐项更新 `repo_rules.py`，再更新 `GATE_VERSION`，
-然后重跑 `tests/test_gates.py`。比对项：`REPO_SOURCE_PATTERNS`、`PARENT_NAMED_STEMS`、
-`GENERIC_DIR_NAMES`、`GENERIC_TOKENS`、`IGNORED_SOURCE_DIR_PARTS`、`DEMAND_MODE_LEXICON`。
+然后重跑 `tests/test_gates.py`。`--rules-drift` 的比对项：`REPO_SOURCE_PATTERNS`、
+`PARENT_NAMED_STEMS`、`GENERIC_DIR_NAMES`、`GENERIC_TOKENS`、`IGNORED_SOURCE_DIR_PARTS`、
+`DEMAND_MODE_LEXICON`；`--banned-drift` 的比对项：`BANNED_TOPIC_KEYWORDS`（按分类逐词比）。
 
 ## 生成出来的仓库还要满足的工程约定
 

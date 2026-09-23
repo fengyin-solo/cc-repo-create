@@ -39,7 +39,7 @@ description: "生成可直接出题、并且能直接交付的全栈代码仓库
 | G3 忽略 | 根目录 `.gitignore` 覆盖依赖、缓存、构建产物、日志、环境文件、IDE、OS 文件 |
 | G4 体量 | 源码 >= 2000 行（不含依赖目录、构建产物、锁文件） |
 | G5 容量 | 出题容量 >= 30 条（主体数 × 每主体上限，需求模式数 × 每模式上限，再和单仓库上限取小） |
-| G6 合规 | 不含禁用题型（`代码理解`），无密钥、无超大文件、无违规业务域 |
+| G6 合规 | 不含禁用题型（`代码理解`），无密钥、无超大文件、无违规业务域，**且题域不命中 0731 严禁出题清单** |
 | G7 环境 | 基础环境自洽：Python 全量可编译、后端入口能 import、依赖都声明了、没有写死本机路径 |
 
 外加一道 **G8 真启动**复核：后端真的起来并返回数据、前端页面真的有挂载点、
@@ -52,11 +52,20 @@ description: "生成可直接出题、并且能直接交付的全栈代码仓库
 
 ### 1. 定 spec
 
-复制一份 `examples/spec-park-pass.json`，改题域与业务模块。**模块数 >= 16**，
+复制一份 `examples/spec-film-production.json`，改题域与业务模块。**模块数 >= 16**，
 每个模块 6~8 个具体业务字段（别写「数据 / 状态 / 用户」这类泛词，主体识别会过滤掉），
 动作至少 2~3 个且方向不同（正向推进 + 打回/作废）。
 
-字段说明与挑题域的注意事项见 [references/spec-format.md](references/spec-format.md)。
+**先过严禁题域自检再往下走**——题域命中就是废题，做得再合规也没用：
+
+```bash
+python3 <skill>/scripts/scaffold_repo.py --check-spec --spec /path/to/spec.json
+```
+
+命中会逐条点名「哪个禁用词出现在哪个字段」，退出码非 0。生成时也会再拦一次，
+**没有绕过参数**：这不是措辞问题，是题域问题，只能换方向重写。
+
+字段说明、挑题域的注意事项与禁用方向见 [references/spec-format.md](references/spec-format.md)。
 
 ### 2. 生成
 
@@ -181,7 +190,7 @@ cc10001、cc10002、YEL10003 …
 
 要让一个仓库真的出满 30 条，两件事缺一不可：
 
-1. **仓库侧**：主体数 >= 16（默认 spec 实测 29 个主体，容量 35，留足余量）；
+1. **仓库侧**：主体数 >= 16（默认 spec 实测 31 个主体，容量 35，留足余量）；
 2. **出题侧**：每模式上限取 3。**这一条已经落地**：GSB 建仓脚本把每模式上限的默认值
    改成 3，写表命令 `batch_prompt_workbook.py update` 与独立复检 `check_repo_theme.py`
    都支持透传 `--max-per-mode`，GSB 批次三条命令统一带 `--max-per-mode 3`。
@@ -189,6 +198,31 @@ cc10001、cc10002、YEL10003 …
 `verify_repo.py` 默认也按 `--per-mode 3` 验收，和出题侧同尺。如果哪一批要收回旧口径，
 建仓、写表、复检三处的上限要**一起**改成 2，否则会出现「建仓按 3 排、写表在第 25 条开始拦」
 互相打架；这时单仓库上限就是 24 条，不要按 30 条承诺。
+
+## 严禁题域（命中即废题）
+
+跟「禁用题型」不是一回事：禁用题型说的是仓库**长不成**那种样子，可以靠补业务模块救回来；
+严禁题域说的是**这个方向根本不许出题**——仓库做得再合规、容量再够，命中就是废题。
+
+清单来自 `gsb-creator/references/0731_方案规则.md` 第 6 节（抄写日期 2026-09-23），四类：
+
+- 🎮 **游戏与图形**：贪吃蛇、打砖块、俄罗斯方块、坦克大战及变种；粒子/物理模拟；塔防/2D 解谜/潜行/平台跳跃；喂食小动物；记忆翻牌/连连看；五子棋等棋类；2048；扫雷；打地鼠
+- 🖥️ **本地/桌面工具**：命令行 CLI、代码片段管理器、批量重命名、截图标注、文件管理/同步、书签、密码管理器
+- 🏢 **平台/业务系统**：电商购物车/订单、RBAC 权限后台、仓库库存、投票问卷、考勤 OA、图书借阅、博客 CMS、医院挂号/问诊、外卖点餐、CRM、IM 私信、拍卖、停车场、工单客服、商品+Excel 导入、积分商城、XXX 预约系统
+- 📊 **数据可视化/前端页面**：报表统计、Streamlit、CSV 看板、记账、健康健身、菜谱、天气、番茄钟、习惯打卡、音乐播放器、旅行日记、观影记录
+
+**拦在哪两处**（都不给绕过参数）：
+
+| 位置 | 扫什么 | 行为 |
+|---|---|---|
+| `scaffold_repo.py` 生成前 | spec 的 `app_name` / `app_slug` / `app_desc` + 每个模块的 `key` / `name` / `entity` / `desc` / `fields` / `statuses` / `actions` / `action_targets` / `metrics` | 命中就拒绝生成，逐条点名「哪个词出现在哪个字段」，不落任何目录 |
+| `verify_repo.py` 的 G6 | 仓库目录名 + README + 全部文本源码 | 命中就判 G6 不通过（`banned_topic_hits` 里带文件路径） |
+
+仓库侧比下游 `check_repo.py` 严一档：下游只读「仓库名 + README」，这里连源码一起扫。
+之所以敢严，是因为生成的 README 里本来就有一张「模块 | 目录 | 业务对象 | 主要字段」的表，
+模块 key 和业务字段都在 README 里露过面，源码命中基本等于 README 也会命中。
+
+**换题域，不要改字眼。** 把「库存」改成「在库」绕过关键词，题域还是那个题域。
 
 ## 禁用题型
 
@@ -207,17 +241,23 @@ cc10001、cc10002、YEL10003 …
 
 ## 规则同步（快照可能过期）
 
-`scripts/repo_rules.py` 是出题闸门口径的冻结快照（抄写日期 2026-09-22）。换了新版的
-出题流水线，先比对再生成：
+`scripts/repo_rules.py` 是出题闸门口径的冻结快照（容量/主体口径抄写日期 2026-09-22，
+严禁题域清单抄写日期 2026-09-23）。换了新版的出题流水线，先比对再生成：
 
 ```bash
-python3 <skill>/scripts/verify_repo.py --rules-drift <任一份外部出题闸门脚本的路径>
+# 容量/主体/需求模式口径，指向 check_repo_theme.py
+python3 <skill>/scripts/verify_repo.py --rules-drift <check_repo_theme.py 的路径>
+
+# 严禁题域清单，指向 check_repo.py
+python3 <skill>/scripts/verify_repo.py --banned-drift <check_repo.py 的路径>
 ```
 
-这个参数是可选的：只在目标机器上已经有出题闸门脚本（例如 `check_repo_theme.py`）时才用，
-脚本会逐个比对 `REPO_SOURCE_PATTERNS` / `DEMAND_MODE_LEXICON` 等常量。`ok: false` 时按输出
-点名的那几个常量更新 `repo_rules.py`、更新 `GATE_VERSION`、重跑自测。
-没有这份脚本时跳过这一步，本 skill 不依赖它也能独立生成与验收。
+两条都是可选的：只在目标机器上已经有对应的出题脚本时才用。`--rules-drift` 逐个比对
+`REPO_SOURCE_PATTERNS` / `PARENT_NAMED_STEMS` / `GENERIC_DIR_NAMES` / `GENERIC_TOKENS` /
+`IGNORED_SOURCE_DIR_PARTS` / `DEMAND_MODE_LEXICON`；`--banned-drift` 按分类比对
+`BANNED_TOPIC_KEYWORDS` 与对方 `BANNED_KEYWORDS`（对方脚本里那份表叫
+`BANNED_TOPIC_KEYWORDS` 也认）。`ok: false` 时按输出点名的那几项更新 `repo_rules.py`、
+更新 `GATE_VERSION`、重跑自测。没有这些脚本时跳过，本 skill 不依赖它也能独立生成与验收。
 
 ## 自测
 
@@ -225,7 +265,7 @@ python3 <skill>/scripts/verify_repo.py --rules-drift <任一份外部出题闸�
 python3 -m unittest discover -s <skill>/tests -v
 ```
 
-35 条用例：生成出来的仓库要过全部闸门；把 `open: false` 改成 `true`、删掉 `.gitignore`、
+56 条用例：生成出来的仓库要过全部闸门；把 `open: false` 改成 `true`、删掉 `.gitignore`、
 塞一个硬编码密钥、写死一个本机绝对路径、漏声明一个依赖、把 `true` 当 Python 变量用、
 把模块砍到 3 个、把主体砍到 2 个，闸门都必须拦下；依赖目录落地后必须被 `git check-ignore`
 命中；React + Java 变体也要过；推送链路要覆盖「dry-run 不碰远端」「首次推 main」
@@ -234,6 +274,9 @@ python3 -m unittest discover -s <skill>/tests -v
 「GitHub 占用时往后跳」「查不了 GitHub 时回退本地序号」「显式编号冲突就报错」「编号封顶」。
 可见性链路要覆盖「已经是 public 就不动」「private 会被改成 public」「dry-run 只计划不改」
 「改完还是 private 要报错」「读不到可见性不阻塞」。
+严禁题域链路要覆盖「出厂默认 spec 永远干净」「旧的园区 spec 现在生成不了」「禁用词只出现在
+业务字段/应用描述里也要拦」「被拒的 spec 不落目录」「README 命中要拦」「只有源码命中也要拦」
+「仓库目录名命中要拦」「干净仓库报未命中」「清单漂移能比出来」「对方没有这份表时不误判」。
 
-改了 `scaffold_repo.py` / `verify_repo.py` / `repo_rules.py` / `publish_github.py`
-先跑它，再动真实仓库。
+改了 `scaffold_repo.py` / `verify_repo.py` / `repo_rules.py` / `probe_startup.py` /
+`publish_github.py` 先跑它，再动真实仓库。

@@ -316,11 +316,15 @@ def check_gitignore(repo: Path) -> dict[str, object]:
 
 
 def check_forbidden(repo: Path, structure: dict[str, object]) -> dict[str, object]:
-    """合规扫描：禁用题型、密钥、二进制大块、违规业务域。"""
+    """合规扫描：禁用题型、密钥、二进制大块、违规业务域、严禁出题题域。"""
     problems: list[str] = []
     secret_hits: list[str] = []
     content_hits: list[str] = []
     big_files: list[str] = []
+    topic_hits: set[str] = set()
+    # 题域扫描的第一站是仓库目录名：下游 check_repo.py 判的就是「仓库名 + README」。
+    for category, keyword in rules.scan_banned_topics(repo.name):
+        topic_hits.add(f"仓库目录名：{rules.describe_banned_topic(category, keyword)}")
     for path in _iter_repo_text_files(repo):
         rel = str(path.relative_to(repo))
         size = path.stat().st_size
@@ -331,11 +335,15 @@ def check_forbidden(repo: Path, structure: dict[str, object]) -> dict[str, objec
         if size > MAX_TEXT_FILE_BYTES:
             big_files.append(f"{rel} ({size // 1024}KB)")
             continue
-        if path.suffix.lower() not in CODE_SUFFIXES:
-            continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            continue
+        # 题域扫描覆盖所有文本文件（README、配置、页面文案都算）。比下游只读 README
+        # 更严一档：README 的模块表里就带着模块 key 与业务字段，源码命中基本等于 README 也会命中。
+        for category, keyword in rules.scan_banned_topics(text):
+            topic_hits.add(f"{rel}：{rules.describe_banned_topic(category, keyword)}")
+        if path.suffix.lower() not in CODE_SUFFIXES:
             continue
         for pattern, why in SECRET_PATTERNS:
             if re.search(pattern, text):
@@ -349,6 +357,11 @@ def check_forbidden(repo: Path, structure: dict[str, object]) -> dict[str, objec
         problems.append("违规业务内容：" + "；".join(content_hits[:5]))
     if big_files:
         problems.append("存在超大文件，产物快照会被判 too_large：" + "；".join(big_files[:5]))
+    if topic_hits:
+        problems.append(
+            f"命中严禁出题题域，命中即废题（依据 {rules.BANNED_TOPIC_SOURCE}）："
+            + "；".join(sorted(topic_hits)[:8])
+            + "。换题域重做，不要靠改字眼绕过去")
 
     # 禁用题型：仓库必须能出「代码生成 / 功能迭代 / 缺陷修复 / 代码重构 / 工程化」，
     # 不能做成只能讲清楚代码怎么走的仓库（只有文档、没有可改可跑的业务代码）。
@@ -368,6 +381,7 @@ def check_forbidden(repo: Path, structure: dict[str, object]) -> dict[str, objec
         "secret_hits": secret_hits,
         "forbidden_content_hits": content_hits,
         "big_files": big_files,
+        "banned_topic_hits": sorted(topic_hits),
     }
 
 
@@ -601,6 +615,55 @@ def check_capacity(repo: Path, *, min_capacity: int, per_mode: int, per_subject:
     }
 
 
+def banned_drift(path: Path) -> dict[str, object]:
+    """只比对严禁题域清单，供 `--banned-drift` 使用。
+
+    `--rules-drift` 比的是容量/主体那一套口径（check_repo_theme.py），
+    而严禁清单的代码副本在 gsb-creator/scripts/check_repo.py 里，两者不是同一份脚本。
+    单独开一条命令，语义才清楚：更新了 0731 清单，就跑这条确认快照没过期。
+    """
+    spec = importlib.util.spec_from_file_location("external_banned_source", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    theirs = None
+    theirs_name = "absent"
+    for candidate in ("BANNED_TOPIC_KEYWORDS", "BANNED_KEYWORDS"):
+        value = getattr(module, candidate, None)
+        if value is not None:
+            theirs = value
+            theirs_name = candidate
+            break
+    if theirs is None:
+        return {
+            "ok": False,
+            "diffs": [f"{path} 里既没有 BANNED_TOPIC_KEYWORDS 也没有 BANNED_KEYWORDS"],
+            "their_banned_keywords": "absent",
+        }
+    mine = {key: tuple(value) for key, value in rules.BANNED_TOPIC_KEYWORDS.items()}
+    other = {key: tuple(value) for key, value in theirs.items()}
+    diffs: list[str] = []
+    for key in sorted(set(mine) | set(other)):
+        if key not in other:
+            diffs.append(f"分类 {key}：对方没有")
+        elif key not in mine:
+            diffs.append(f"分类 {key}：我方没有")
+        elif set(mine[key]) != set(other[key]):
+            only_mine = sorted(set(mine[key]) - set(other[key]))
+            only_theirs = sorted(set(other[key]) - set(mine[key]))
+            detail = []
+            if only_mine:
+                detail.append("我方多出 " + "、".join(only_mine))
+            if only_theirs:
+                detail.append("对方多出 " + "、".join(only_theirs))
+            diffs.append(f"分类 {key} 词表不一致：" + "；".join(detail))
+    return {
+        "ok": not diffs,
+        "diffs": diffs,
+        "their_banned_keywords": theirs_name,
+        "snapshot_date": rules.BANNED_TOPIC_SNAPSHOT_DATE,
+    }
+
+
 def rules_drift(path: Path) -> dict[str, object]:
     """比对冻结规则与另一台机器上实际生效的口径，防止快照悄悄过期。"""
     spec = importlib.util.spec_from_file_location("external_check_repo_theme", path)
@@ -632,6 +695,24 @@ def rules_drift(path: Path) -> dict[str, object]:
     theirs_max_mode = getattr(module, "DEFAULT_MAX_PER_MODE", None)
     theirs_max_subject = getattr(module, "DEFAULT_MAX_PER_SUBJECT", None)
     theirs_max_repo = getattr(module, "DEFAULT_MAX_PER_REPO", None)
+
+    # 严禁题域清单是「可选比对」。出题闸门脚本里这份表可能叫 BANNED_TOPIC_KEYWORDS，
+    # 也可能叫 BANNED_KEYWORDS（gsb-creator/scripts/check_repo.py 就是这么命名的）。
+    # 两个名字都没有时**静默跳过**：老的 check_repo_theme.py 不带这份清单，
+    # 不该因为缺一个常量就把整次比对判成失败。
+    theirs_banned = None
+    theirs_banned_name = "absent"
+    for candidate in ("BANNED_TOPIC_KEYWORDS", "BANNED_KEYWORDS"):
+        value = getattr(module, candidate, None)
+        if value is not None:
+            theirs_banned = value
+            theirs_banned_name = candidate
+            break
+    if theirs_banned is not None:
+        mine_banned = {key: tuple(value) for key, value in rules.BANNED_TOPIC_KEYWORDS.items()}
+        their_banned = {key: tuple(value) for key, value in theirs_banned.items()}
+        if mine_banned != their_banned:
+            diffs.append(f"BANNED_TOPIC_KEYWORDS 与对方的 {theirs_banned_name} 不一致")
     return {
         "ok": not diffs,
         "diffs": diffs,
@@ -640,6 +721,7 @@ def rules_drift(path: Path) -> dict[str, object]:
             "max_per_subject": theirs_max_subject,
             "max_per_repo": theirs_max_repo,
         },
+        "their_banned_keywords": theirs_banned_name,
     }
 
 
@@ -691,9 +773,17 @@ def main() -> int:
                         help=f"每类需求模式最多出几条，默认 {rules.MAX_PER_MODE}")
     parser.add_argument("--per-subject", type=int, default=rules.MAX_PER_SUBJECT,
                         help=f"每个主体最多出几条，默认 {rules.MAX_PER_SUBJECT}")
-    parser.add_argument("--rules-drift", help="比对另一台机器上的 check_repo_theme.py 口径")
+    parser.add_argument("--rules-drift",
+                        help="比对另一台机器上的 check_repo_theme.py 口径（容量/主体/需求模式）")
+    parser.add_argument("--banned-drift",
+                        help="只比对严禁题域清单，指向 gsb-creator/scripts/check_repo.py")
     parser.add_argument("--json", action="store_true", help="只打印 JSON")
     args = parser.parse_args()
+
+    if args.banned_drift:
+        result = banned_drift(Path(args.banned_drift).expanduser())
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["ok"] else 1
 
     if args.rules_drift:
         result = rules_drift(Path(args.rules_drift).expanduser())
@@ -701,7 +791,7 @@ def main() -> int:
         return 0 if result["ok"] else 1
 
     if not args.repo:
-        parser.error("要么给 --repo，要么给 --rules-drift")
+        parser.error("要么给 --repo，要么给 --rules-drift / --banned-drift")
     repo = Path(args.repo).expanduser().resolve()
     if not repo.is_dir():
         print(json.dumps({"ok": False, "failures": [f"仓库目录不存在：{repo}"]}, ensure_ascii=False))
@@ -721,8 +811,12 @@ def main() -> int:
               f"卡在 {cap['binding_limit']}）")
         for failure in result["failures"]:
             print(f"  ✗ {failure}")
+        topic_hits = result["checks"]["compliance"].get("banned_topic_hits") or []
+        if topic_hits:
+            print(f"  ✗ 严禁题域命中 {len(topic_hits)} 处：{'；'.join(topic_hits[:8])}")
         if not result["failures"]:
             print("  全部硬性要求通过")
+            print(f"  严禁题域：未命中（{rules.BANNED_TOPIC_SOURCE}）")
     return 0 if result["ok"] else 1
 
 

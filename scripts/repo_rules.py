@@ -7,9 +7,9 @@
 为什么要抄一份而不是直接 import：本 skill 会被单独拿到别的机器 / 别的流程里用，不能假设
 出题流水线的脚本一定在。抄一份的代价是可能过期，所以：
 
-  1. 拿到新版出题流水线后，用 verify_repo.py --rules-drift <那台机器上的 check_repo_theme.py>
-     比对；不一致时按 references/hard-rules.md 的「规则同步」一节更新本文件。
-  2. 本文件只做三件事：派生主体、算容量、判忽略。不参与写题，也不改任何仓库。
+  1. 拿到新版出题流水线后，用 verify_repo.py --rules-drift <那台机器上的 check_repo_theme.py
+     或 check_repo.py> 比对；不一致时按 references/hard-rules.md 的「规则同步」一节更新本文件。
+  2. 本文件只做四件事：派生主体、算容量、判忽略、判严禁题域。不参与写题，也不改任何仓库。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import re
 from pathlib import Path
 from typing import Iterable
 
-GATE_VERSION = "cc-repo-create-2026-09-22"
+GATE_VERSION = "cc-repo-create-2026-09-23"
 
 # ---------------------------------------------------------------------------
 # 源码扫描模式：只有命中这些模式的文件才会被当成「可独立出题的主体」。
@@ -121,6 +121,104 @@ DEMAND_MODE_LEXICON: dict[str, tuple[str, ...]] = {
 FORBIDDEN_TASK_TYPES = ("代码理解",)
 # 出题时允许使用的需求模式 = 全部模式减去禁用类型那一格。
 USABLE_MODES = tuple(m for m in DEMAND_MODE_LEXICON if m not in FORBIDDEN_TASK_TYPES)
+
+# ---------------------------------------------------------------------------
+# 严禁出题题域（命中即废题，无豁免）
+#
+# 来源：`gsb-creator/references/0731_方案规则.md` 第 6 节「严禁出题清单（命中即废题）」，
+# 该节摘自《Seed 模型 GSB 众测方案（0731）》。抄写日期 2026-09-23。
+#
+# 判废方式与「禁用题型」不同：禁用题型是仓库**长不成**那种样子，这里则是题域本身
+# 就不许出——哪怕仓库做得再合规、容量再够，命中就是废题。所以 scaffold 生成前与
+# verify 验收时都要拦，且不提供任何绕过参数。
+#
+# BANNED_TOPIC_KEYWORDS 与 gsb-creator/scripts/check_repo.py 的 BANNED_KEYWORDS 逐字对齐
+# （连分类名都保持英文原样），这样 verify_repo.py --rules-drift 能直接做字典相等比对。
+# ---------------------------------------------------------------------------
+BANNED_TOPIC_SOURCE = "0731 方案规则 §6 严禁出题清单（命中即废题）"
+BANNED_TOPIC_SNAPSHOT_DATE = "2026-09-23"
+
+BANNED_TOPIC_CATEGORY_LABELS: dict[str, str] = {
+    "game": "游戏与图形",
+    "desktop_tool": "本地与桌面工具",
+    "business_system": "平台与业务系统",
+    "data_viz": "数据可视化与前端页面",
+}
+
+BANNED_TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "game": (
+        "snake", "breakout", "tetris", "tank-battle", "tankwar", "tower-defense",
+        "gomoku", "gobang", "2048", "minesweeper", "whack-a-mole", "memory-card",
+        "lianliankan", "flappy", "pacman", "贪吃蛇", "俄罗斯方块", "坦克大战",
+        "五子棋", "扫雷", "打地鼠", "塔防", "连连看",
+    ),
+    "desktop_tool": (
+        "snippet-manager", "batch-rename", "screenshot-annotate", "bookmark",
+        "password-manager", "file-sync", "密码管理", "书签", "批量重命名",
+    ),
+    "business_system": (
+        "shopping-cart", "ecommerce", "e-commerce", "rbac", "inventory",
+        "voting", "questionnaire", "attendance", "library-management",
+        "blog-cms", "hospital-registration", "takeout", "takeaway", "crm",
+        "auction", "parking", "ticket-system", "points-mall", "booking-system",
+        "reservation", "购物车", "电商", "权限", "库存", "问卷", "考勤",
+        "图书借阅", "博客", "挂号", "外卖", "拍卖", "停车场", "工单", "预约",
+    ),
+    "data_viz": (
+        "streamlit", "csv-dashboard", "accounting", "ledger", "fitness-tracker",
+        "recipe", "weather-app", "pomodoro", "habit-tracker", "music-player",
+        "travel-diary", "movie-tracker", "记账", "菜谱", "天气", "番茄钟",
+        "习惯打卡", "音乐播放器", "观影",
+    ),
+}
+
+# 上面那张表是**代码副本的口径**，但 0731 §6 的原文比它更长：有些被点名的题域没有对应
+# 关键词。这里把原文里能安全落成关键词的补进来，只收「题域级」的词。
+#
+# 刻意不收的几类（收了就是误伤）：
+#   - `cli` / `im`：子串炸弹，`cli` 命中 `client`、`im` 命中 `import`；
+#   - `看板` / `报表` / `导入` / `同步` / `文件`：是需求模式里的正常词，且本 skill 出厂
+#     spec 自己就有 `dashboardmetric 运营看板` 模块，收了会把自己拦下；
+#   - 任何候选词都必须先过 examples/ 里的默认 spec 与两个真实 spec 的回归，
+#     误伤的一律退回。
+BANNED_TOPIC_EXTRA_TERMS: dict[str, tuple[str, ...]] = {
+    "game": (
+        "粒子模拟", "物理模拟", "解谜", "潜行", "平台跳跃", "喂食小动物",
+        "记忆翻牌", "棋类",
+    ),
+    "desktop_tool": (
+        "命令行", "代码片段", "截图标注", "文件管理", "文件同步",
+    ),
+    "business_system": (
+        "问诊", "私信", "商品导入", "excel 导入", "积分商城",
+    ),
+    "data_viz": (
+        "报表统计", "健康健身", "旅行日记", "观影记录",
+    ),
+}
+
+
+def describe_banned_topic(category: str, keyword: str) -> str:
+    """把命中项渲染成「中文分类/命中词」，供报错文案使用。"""
+    label = BANNED_TOPIC_CATEGORY_LABELS.get(category, category)
+    return f"{label}/{keyword}"
+
+
+def scan_banned_topics(text: str) -> list[tuple[str, str]]:
+    """扫描文本是否命中严禁出题题域，返回去重且稳定排序的 [(分类, 命中词)]。
+
+    口径与下游 check_repo.py 的 `kw in text` 保持一致：**大小写不敏感的子串匹配**，
+    不做分词、不做词边界判断。宁可严一点，也不要因为写法差异漏掉一处。
+    """
+    haystack = text.lower()
+    hits: set[tuple[str, str]] = set()
+    for table in (BANNED_TOPIC_KEYWORDS, BANNED_TOPIC_EXTRA_TERMS):
+        for category, keywords in table.items():
+            for keyword in keywords:
+                if keyword.lower() in haystack:
+                    hits.add((category, keyword))
+    return sorted(hits)
+
 
 # ---------------------------------------------------------------------------
 # 容量口径

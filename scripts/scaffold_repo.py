@@ -9,12 +9,16 @@
   4. 源码总行数 >= 2000 行（不含依赖目录、构建产物、锁文件）。
   5. 不含禁用题型（代码理解），业务代码落在扫描模式覆盖的路径里。
   6. 主体数与需求模式数算出来的容量 >= 30（见 references/hard-rules.md）。
+  7. **题域不能命中 0731 严禁出题清单**（命中即废题）。这条在生成之前就拦：
+     spec 的应用名 / 描述 / 模块名 / 业务字段 / 状态 / 动作里出现禁用词就直接拒绝生成，
+     没有绕过参数。命中即换题域，别改措辞绕。
 
 用法：
 
     python3 scaffold_repo.py --out /path/to/repo --spec spec.json
     python3 scaffold_repo.py --out /path/to/repo --frontend react --backend java
     python3 scaffold_repo.py --out /path/to/repo --git-init      # 顺手 git init + 首次提交
+    python3 scaffold_repo.py --check-spec --spec spec.json       # 只自检题域，不生成任何目录
 
 生成完不会自动装依赖；装依赖、起服务、验收统一走 SKILL.md 的「验收」一节。
 """
@@ -36,7 +40,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import repo_rules as rules  # noqa: E402
 
-DEFAULT_SPEC_NAME = "spec-park-pass.json"
+DEFAULT_SPEC_NAME = "spec-film-production.json"
 
 # 项目编号：<前缀 2~4 个字母><5 位数>，5 位数首位固定是 1（10001–19999），例如 cc10001。
 PROJECT_ID_RE = re.compile(r"^([A-Za-z]{2,4})(1\d{4})$")
@@ -153,6 +157,68 @@ def pick_project_id(
 # ---------------------------------------------------------------------------
 # spec 读取
 # ---------------------------------------------------------------------------
+SPEC_TOPIC_SCALARS = ("app_name", "app_slug", "app_desc")
+SPEC_TOPIC_LIST_FIELDS = ("fields", "statuses", "actions", "action_targets", "metrics")
+SPEC_TOPIC_MODULE_SCALARS = ("key", "name", "entity", "desc")
+
+
+def spec_topic_corpus(spec: dict) -> dict[str, str]:
+    """把 spec 摊成「字段路径 -> 文本」，供严禁题域扫描逐字段定位命中点。
+
+    覆盖应用级三个字段 + 每个模块的标识、名称、业务对象、说明，以及
+    fields / statuses / actions / action_targets / metrics 五组列表。
+    """
+    corpus: dict[str, str] = {}
+    for field in SPEC_TOPIC_SCALARS:
+        corpus[field] = str(spec.get(field) or "")
+    for index, module in enumerate(spec.get("modules") or [], start=1):
+        key = str(module.get("key") or f"module{index}")
+        for field in SPEC_TOPIC_MODULE_SCALARS:
+            corpus[f"modules[{key}].{field}"] = str(module.get(field) or "")
+        for field in SPEC_TOPIC_LIST_FIELDS:
+            for item in module.get(field) or []:
+                corpus[f"modules[{key}].{field}[]"] = (
+                    corpus.get(f"modules[{key}].{field}[]", "") + "\n" + str(item))
+    return corpus
+
+
+def scan_spec_topics(spec: dict) -> list[dict[str, str]]:
+    """扫描 spec 是否命中严禁出题题域，返回 [{category, keyword, label, field}]。"""
+    hits: list[dict[str, str]] = []
+    for field, text in spec_topic_corpus(spec).items():
+        for category, keyword in rules.scan_banned_topics(text):
+            hits.append({
+                "category": category,
+                "keyword": keyword,
+                "label": rules.describe_banned_topic(category, keyword),
+                "field": field,
+            })
+    return hits
+
+
+def banned_topic_report(hits: list[dict[str, str]], spec_path: object = None) -> str:
+    """把命中项渲染成给人看的报错文案。"""
+    by_label: dict[str, set[str]] = {}
+    for hit in hits:
+        by_label.setdefault(hit["label"], set()).add(hit["field"])
+    lines = [
+        "题域命中 0731 严禁出题清单（命中即废题），拒绝生成。",
+        f"依据：{rules.BANNED_TOPIC_SOURCE}（抄写日期 {rules.BANNED_TOPIC_SNAPSHOT_DATE}）",
+    ]
+    if spec_path is not None:
+        lines.append(f"spec：{spec_path}")
+    lines.append("命中项：")
+    for label in sorted(by_label):
+        fields = "、".join(sorted(by_label[label])[:6])
+        lines.append(f"  - {label}  出现在 {fields}")
+    lines += [
+        "",
+        "这不是措辞问题，是题域问题：换个方向重写 spec，不要靠改字眼绕过去。",
+        "可用方向与禁用清单见 references/spec-format.md「严禁题域：这些方向不能选」一节。",
+    ]
+    return "\n".join(lines)
+
+
 def load_spec(path: Path | None, frontend: str | None, backend: str | None) -> dict:
     if path is None:
         path = SKILL_DIR / "examples" / DEFAULT_SPEC_NAME
@@ -180,6 +246,9 @@ def load_spec(path: Path | None, frontend: str | None, backend: str | None) -> d
         seen.add(module["key"])
         if len(module["fields"]) < 3:
             raise SystemExit(f"模块 {module['key']} 的 fields 少于 3 个，主体识别会不达标")
+    topic_hits = scan_spec_topics(spec)
+    if topic_hits:
+        raise SystemExit(banned_topic_report(topic_hits, spec_path=path))
     return spec
 
 
@@ -2308,10 +2377,12 @@ def scaffold(spec: dict, out: Path) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="生成一个满足硬性要求的全栈代码仓库")
-    target = parser.add_mutually_exclusive_group(required=True)
+    target = parser.add_mutually_exclusive_group(required=False)
     target.add_argument("--out", help="输出目录的完整路径（必须为空或不存在）")
     target.add_argument("--parent", help="父目录：按项目编号建 <父目录>/<前缀><5 位数>，例如 cc10001")
-    parser.add_argument("--spec", help="题库 spec json；默认用 examples/spec-park-pass.json")
+    parser.add_argument("--spec", help=f"题库 spec json；默认用 examples/{DEFAULT_SPEC_NAME}")
+    parser.add_argument("--check-spec", action="store_true",
+                        help="只读 spec、校验格式并扫严禁题域，打印报告后退出，不生成任何目录")
     parser.add_argument("--frontend", choices=["vue", "react"], help="覆盖 spec 里的前端技术栈")
     parser.add_argument("--backend", choices=["python", "java"], help="覆盖 spec 里的后端技术栈")
     parser.add_argument("--prefix", default=DEFAULT_PREFIX,
@@ -2324,7 +2395,33 @@ def main() -> int:
     parser.add_argument("--git-init", action="store_true", help="顺手 git init 并做一次提交")
     args = parser.parse_args()
 
-    spec = load_spec(Path(args.spec) if args.spec else None, args.frontend, args.backend)
+    spec_path = Path(args.spec).expanduser() if args.spec else SKILL_DIR / "examples" / DEFAULT_SPEC_NAME
+
+    if args.check_spec:
+        # 只自检：读 spec -> 校验格式 -> 扫严禁题域，不碰磁盘。
+        try:
+            spec = load_spec(spec_path, args.frontend, args.backend)
+        except SystemExit as exc:
+            print(json.dumps({
+                "ok": False,
+                "spec": str(spec_path),
+                "reason": str(exc),
+            }, ensure_ascii=False, indent=2))
+            return 1
+        print(json.dumps({
+            "ok": True,
+            "spec": str(spec_path),
+            "app_name": spec["app_name"],
+            "modules": len(spec["modules"]),
+            "banned_topic_hits": [],
+            "gate_version": rules.GATE_VERSION,
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    if not args.out and not args.parent:
+        parser.error("需要 --out 或 --parent 之一（或改用 --check-spec 只自检 spec）")
+
+    spec = load_spec(spec_path, args.frontend, args.backend)
 
     project: dict[str, object] = {}
     if args.parent:

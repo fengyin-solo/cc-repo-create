@@ -55,7 +55,7 @@
    ```bash
    python3 <skill>/scripts/scaffold_repo.py \
      --parent "/Users/fengyin/项目/字节/ccGsb/任务目录 2" \
-     --spec <skill>/examples/spec-park-pass.json --git-init
+     --spec <skill>/examples/spec-film-production.json --git-init
    ```
 
 2. **`<skill>` 要展开成绝对路径**，因为 `--parent` 模式下脚本不假设 cwd：

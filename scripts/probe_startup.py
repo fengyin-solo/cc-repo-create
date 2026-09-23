@@ -141,12 +141,30 @@ def detect_ports(repo: Path, backend_dir: Path | None, frontend_dir: Path | None
     return backend_port, frontend_port
 
 
+def default_spec_module_key() -> str | None:
+    """默认 spec 里第一个模块的 key，用作探不到业务接口时的兜底。
+
+    从默认 spec 现读，而不是写死一个模块名：题域换了、默认 spec 换了，
+    这里会跟着走，不会留下一个指向旧题域的兜底接口。
+    """
+    try:
+        import scaffold_repo  # 同目录，只借它的默认 spec 名字
+        spec_path = Path(__file__).resolve().parent.parent / "examples" / scaffold_repo.DEFAULT_SPEC_NAME
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    modules = spec.get("modules") or []
+    if modules and modules[0].get("key"):
+        return str(modules[0]["key"])
+    return None
+
+
 def discover_business_endpoints(backend_dir: Path | None) -> list[str]:
     """从仓库里找出可探的业务接口，避免把某个题域的模块名写死。
 
     先扫 Python 后端的 app/routers/*.py 里的 APIRouter(prefix="/api/xxx")，
-    再扫 Java 后端的 @RequestMapping("/api/xxx")；都扫不到时退回 /api/visitor
-    （默认 spec 的模块），保证老仓库的行为不变。
+    再扫 Java 后端的 @RequestMapping("/api/xxx")；都扫不到时退回默认 spec 第一个
+    模块对应的接口，保证老仓库的行为不变。
     """
     found: list[str] = []
     if backend_dir:
@@ -166,7 +184,8 @@ def discover_business_endpoints(backend_dir: Path | None) -> list[str]:
                 for match in re.findall(r"@RequestMapping\(\s*[\"']([^\"']+)[\"']", text):
                     if match not in found:
                         found.append(match)
-    return found or ["/api/visitor"]
+    fallback_key = default_spec_module_key()
+    return found or [f"/api/{fallback_key}" if fallback_key else "/api/health"]
 
 
 def run_clean_clone(repo: Path, args) -> int:

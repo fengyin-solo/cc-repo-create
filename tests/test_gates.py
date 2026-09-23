@@ -28,7 +28,10 @@ import probe_startup as probe  # noqa: E402
 import scaffold_repo as scaffold_mod  # noqa: E402
 import verify_repo as verifier  # noqa: E402
 
-SPEC = SKILL_DIR / "examples" / "spec-park-pass.json"
+SPEC = SKILL_DIR / "examples" / "spec-film-production.json"
+# 历史遗留：这份 spec 是「园区通行与安全运营平台」，因为含 工单 / 库存 / 权限 / 预约
+# 四个禁用模块，已经不能作为出厂默认。留在这里当严禁题域的反例。
+BANNED_SPEC = SKILL_DIR / "tests" / "fixtures" / "spec-park-pass-banned.json"
 
 
 def publish_args(**overrides) -> argparse.Namespace:
@@ -98,7 +101,7 @@ class ScaffoldAndVerify(unittest.TestCase):
         first = rules.derive_subjects(self.repo)
         second = rules.derive_subjects(self.repo)
         self.assertEqual(set(first), set(second))
-        self.assertIn("visitor", first)
+        self.assertIn("script", first)
 
     def test_auto_open_true_is_rejected(self):
         copy = self.tmp / "auto-open"
@@ -183,7 +186,7 @@ class ScaffoldAndVerify(unittest.TestCase):
         """语法错误必须在交付前拦下，而不是等起服务才发现。"""
         copy = self.tmp / "syntax"
         shutil.copytree(self.repo, copy, ignore=shutil.ignore_patterns(".git"))
-        target = copy / "backend" / "app" / "services" / "visitor.py"
+        target = copy / "backend" / "app" / "services" / "script.py"
         target.write_text(target.read_text(encoding="utf-8") + "\nBROKEN = true\n", encoding="utf-8")
         result = self.verify(copy)
         self.assertFalse(result["ok"])
@@ -502,7 +505,7 @@ class NumberingTest(unittest.TestCase):
 
 
 class ProbeEndpointDiscovery(unittest.TestCase):
-    """探针不该把业务接口写死成默认 spec 的 /api/visitor，而要从仓库里自己找。"""
+    """探针不该把业务接口写死成某个题域的模块名，而要从仓库里自己找。"""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="probe-discovery-"))
@@ -530,17 +533,204 @@ class ProbeEndpointDiscovery(unittest.TestCase):
         self.assertEqual(found, ["/api/order"])
 
     def test_falls_back_to_default_spec_key_when_nothing_is_found(self):
-        self.assertEqual(probe.discover_business_endpoints(None), ["/api/visitor"])
+        # 兜底接口跟着默认 spec 的第一个模块走，不写死题域。
+        expected = f"/api/{probe.default_spec_module_key()}"
+        self.assertEqual(probe.discover_business_endpoints(None), [expected])
         empty = self.tmp / "backend"
         empty.mkdir()
-        self.assertEqual(probe.discover_business_endpoints(empty), ["/api/visitor"])
+        self.assertEqual(probe.discover_business_endpoints(empty), [expected])
 
-    def test_generated_default_spec_repo_is_still_probed_at_visitor(self):
+    def test_generated_default_spec_repo_is_probed_at_its_first_module(self):
         target = self.tmp / "default-spec-repo"
         generate(target, "--spec", str(SPEC))
         found = probe.discover_business_endpoints(target / "backend")
-        self.assertIn("/api/visitor", found)
+        self.assertIn(f"/api/{probe.default_spec_module_key()}", found)
         self.assertEqual(found, sorted(found))
+
+
+class BannedTopics(unittest.TestCase):
+    """严禁出题题域：spec 预检与仓库验收两处都要拦得住，且没有绕过口子。
+
+    这条闸门来自 0731 方案规则 §6「严禁出题清单（命中即废题）」。跟禁用题型不同，
+    它判的是**题域**本身：仓库做得再合规，命中就是废题。
+    """
+
+    # 一个干净的模块模板：任何字段都不含禁用词。
+    CLEAN_MODULE = {
+        "key": "inspect",
+        "name": "设备点检",
+        "entity": "点检记录",
+        "fields": ["点检单号", "设备名称", "点检部位", "点检结果", "点检人", "点检时间"],
+        "statuses": ["待点检", "点检中", "已合格", "已异常"],
+        "actions": ["开始点检", "判定合格", "登记异常"],
+        "action_targets": ["点检中", "已合格", "已异常"],
+        "metrics": ["今日点检", "待点检设备", "异常记录"],
+    }
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="banned-topic-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write_spec(self, name: str, module: dict, **top) -> Path:
+        spec = {
+            "app_name": "设备点检与润滑管理平台",
+            "app_slug": "equipment-inspection",
+            "app_desc": "面向设备点检、润滑加注、油脂化验与检修验收的一体化后台。",
+            "modules": [module],
+        }
+        spec.update(top)
+        path = self.tmp / name
+        path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def check_spec(self, spec: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS / "scaffold_repo.py"),
+             "--check-spec", "--spec", str(spec)],
+            capture_output=True, text=True, check=False)
+
+    def verify(self, repo: Path) -> dict:
+        return verifier.verify(repo, min_lines=2000, min_capacity=30,
+                               per_mode=rules.MAX_PER_MODE, per_subject=rules.MAX_PER_SUBJECT)
+
+    # ---------------- 规则快照本身 ----------------
+
+    def test_default_example_spec_is_clean(self):
+        """出厂默认 spec 必须永远干净，否则 skill 开箱即不可用。"""
+        spec = json.loads(SPEC.read_text(encoding="utf-8"))
+        self.assertEqual(scaffold_mod.scan_spec_topics(spec), [])
+
+    def test_snapshot_declares_its_source(self):
+        self.assertIn("0731", rules.BANNED_TOPIC_SOURCE)
+        self.assertEqual(set(rules.BANNED_TOPIC_KEYWORDS), set(rules.BANNED_TOPIC_CATEGORY_LABELS))
+
+    def test_scan_matches_substring_and_is_case_insensitive(self):
+        self.assertEqual(rules.scan_banned_topics("Shopping-Cart 模块")[0][1], "shopping-cart")
+        self.assertEqual(rules.scan_banned_topics("设备点检"), [])
+
+    # ---------------- spec 预检 ----------------
+
+    def test_historical_park_spec_is_now_refused(self):
+        """出过题的旧默认 spec：含工单/库存/权限/预约，现在必须生成不了。"""
+        result = self.check_spec(BANNED_SPEC)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("严禁出题清单", result.stdout)
+        for word in ("工单", "库存", "权限", "预约"):
+            self.assertIn(word, result.stdout)
+
+    def test_banned_module_name_is_refused(self):
+        spec = self.write_spec("banned-name.json",
+                               dict(self.CLEAN_MODULE, key="spare", name="备件库存"))
+        result = self.check_spec(spec)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("库存", result.stdout)
+
+    def test_banned_keyword_only_in_fields_is_refused(self):
+        """命中点只在业务字段里也要拦——扫的是 spec 全字段。"""
+        module = dict(self.CLEAN_MODULE, fields=["点检单号", "设备名称", "预约时段", "点检结果"])
+        result = self.check_spec(self.write_spec("banned-field.json", module))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("预约", result.stdout)
+
+    def test_banned_keyword_only_in_app_desc_is_refused(self):
+        spec = self.write_spec("banned-desc.json", dict(self.CLEAN_MODULE),
+                               app_desc="面向电商卖家的点检后台。")
+        result = self.check_spec(spec)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("电商", result.stdout)
+
+    def test_clean_spec_passes_check_spec(self):
+        result = self.check_spec(self.write_spec("clean.json", dict(self.CLEAN_MODULE)))
+        self.assertEqual(result.returncode, 0, msg=result.stdout)
+        self.assertTrue(json.loads(result.stdout)["ok"])
+
+    def test_generate_refuses_banned_spec_and_writes_nothing(self):
+        spec = self.write_spec("banned-gen.json",
+                               dict(self.CLEAN_MODULE, entity="维保工单"))
+        out = self.tmp / "never-created"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "scaffold_repo.py"),
+             "--out", str(out), "--spec", str(spec)],
+            capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("工单", result.stderr)
+        self.assertFalse(out.exists(), "被拒的 spec 不该落下任何目录")
+
+    # ---------------- 仓库验收兜底 ----------------
+
+    def test_readme_with_banned_word_is_rejected(self):
+        repo = self.tmp / "readme-hit"
+        generate(repo)
+        with (repo / "README.md").open("a", encoding="utf-8") as handle:
+            handle.write("\n## 客服工单\n")
+        compliance = self.verify(repo)["checks"]["compliance"]
+        self.assertFalse(compliance["ok"])
+        self.assertIn("工单", "；".join(compliance["banned_topic_hits"]))
+
+    def test_banned_word_only_in_source_is_rejected(self):
+        """比下游只读 README 更严一档：源码里出现也算命中。"""
+        repo = self.tmp / "source-hit"
+        generate(repo)
+        page = repo / "frontend" / "src" / "views" / "script" / "index.vue"
+        page.write_text(page.read_text(encoding="utf-8") + "\n<!-- 备件库存盘点 -->\n",
+                        encoding="utf-8")
+        compliance = self.verify(repo)["checks"]["compliance"]
+        self.assertFalse(compliance["ok"])
+        self.assertIn("库存", "；".join(compliance["banned_topic_hits"]))
+
+    def test_repo_directory_name_with_banned_word_is_rejected(self):
+        """下游是拿仓库名判的，目录名里带禁用词同样拦。"""
+        repo = self.tmp / "app-inventory"
+        generate(repo)
+        compliance = self.verify(repo)["checks"]["compliance"]
+        self.assertFalse(compliance["ok"])
+        self.assertIn("inventory", "；".join(compliance["banned_topic_hits"]))
+
+    def test_clean_generated_repo_reports_no_banned_topic(self):
+        repo = self.tmp / "clean-repo"
+        generate(repo)
+        result = self.verify(repo)
+        self.assertTrue(result["ok"], msg=result["failures"])
+        self.assertEqual(result["checks"]["compliance"]["banned_topic_hits"], [])
+
+    # ---------------- 清单随上游漂移 ----------------
+
+    def test_banned_drift_matches_identical_table(self):
+        fake = self.tmp / "same_gate.py"
+        fake.write_text("BANNED_KEYWORDS = %r\n" % (rules.BANNED_TOPIC_KEYWORDS,),
+                        encoding="utf-8")
+        result = verifier.banned_drift(fake)
+        self.assertTrue(result["ok"], msg=result["diffs"])
+        self.assertEqual(result["their_banned_keywords"], "BANNED_KEYWORDS")
+
+    def test_banned_drift_detects_table_difference(self):
+        fake = self.tmp / "drifted_gate.py"
+        fake.write_text("BANNED_KEYWORDS = {'business_system': ['电商']}\n", encoding="utf-8")
+        result = verifier.banned_drift(fake)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("分类" in diff for diff in result["diffs"]), msg=result["diffs"])
+
+    def test_banned_drift_reports_absent_table(self):
+        fake = self.tmp / "no_table.py"
+        fake.write_text("REPO_SOURCE_PATTERNS = ()\n", encoding="utf-8")
+        result = verifier.banned_drift(fake)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["their_banned_keywords"], "absent")
+
+    def test_rules_drift_does_not_fail_when_banned_table_absent(self):
+        """老的 check_repo_theme.py 不带这份清单，不该因此把整次比对判成失败。"""
+        fake = self.tmp / "theme_gate.py"
+        fake.write_text(
+            "REPO_SOURCE_PATTERNS = %r\nPARENT_NAMED_STEMS = %r\nGENERIC_DIR_NAMES = %r\n"
+            "GENERIC_TOKENS = %r\nIGNORED_SOURCE_DIR_PARTS = %r\nDEMAND_MODE_LEXICON = %r\n"
+            % (rules.REPO_SOURCE_PATTERNS, rules.PARENT_NAMED_STEMS, rules.GENERIC_DIR_NAMES,
+               rules.GENERIC_TOKENS, rules.IGNORED_SOURCE_DIR_PARTS, rules.DEMAND_MODE_LEXICON),
+            encoding="utf-8")
+        result = verifier.rules_drift(fake)
+        self.assertTrue(result["ok"], msg=result["diffs"])
+        self.assertEqual(result["their_banned_keywords"], "absent")
 
 
 if __name__ == "__main__":

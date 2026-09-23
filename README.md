@@ -32,7 +32,7 @@ cc10001/
 | G3 忽略 | 根目录 `.gitignore` 覆盖依赖、缓存、构建产物、日志、环境文件 |
 | G4 体量 | 源码 >= 2000 行（不含依赖目录、构建产物、锁文件） |
 | G5 容量 | 出题容量 >= 30 条（主体数 × 每主体上限，需求模式数 × 每模式上限，再与单仓库上限取小） |
-| G6 合规 | 不含禁用题型（`代码理解`）、无密钥、无超大文件、无违规业务域 |
+| G6 合规 | 不含禁用题型（`代码理解`）、无密钥、无超大文件、无违规业务域，**且题域不命中 0731 严禁出题清单** |
 | G7 环境 | Python 全量可编译、后端入口能 import、依赖都声明、没有写死本机路径 |
 | G8 真启动 | **在干净克隆里**装依赖、起服务、打开页面、验代理链路、跑生产构建 |
 
@@ -42,6 +42,9 @@ cc10001/
 ## 用法
 
 ```bash
+# 0) 定完 spec 先自检题域（命中 0731 严禁出题清单就换方向，没有绕过参数）
+python3 scripts/scaffold_repo.py --check-spec --spec <spec.json>
+
 # 1) 生成（按项目编号自动命名：cc10001 / cc10002 / YEL10003 …）
 python3 scripts/scaffold_repo.py --parent <父目录> --spec <spec.json> --git-init
 
@@ -54,6 +57,11 @@ python3 scripts/probe_startup.py --repo <仓库> --clean-clone --build
 # 4) 推到 GitHub（默认 dry-run，确认后加 --execute --confirm PUBLISH）
 python3 scripts/publish_github.py --repo <仓库>
 ```
+
+**严禁题域**：题域命中 0731 严禁出题清单（游戏/图形、本地桌面工具、电商库存工单预约这类
+平台业务系统、记账看板这类数据可视化）就是废题，仓库做得再合规也没用。生成前与验收时各拦一次，
+都不给绕过参数。细节见 [references/spec-format.md](references/spec-format.md) 与
+[references/hard-rules.md](references/hard-rules.md)。
 
 生成的仓库**默认建成 public**（下游容器要能匿名 clone）。脚本不会只靠「建的时候传了 public」
 就算数：推送前后各读一次真实可见性，发现还是 private 就改成 public 并记录前后值，改不动直接报错。
@@ -75,13 +83,14 @@ scripts/
 ├── verify_repo.py       静态验收 G1–G7，非 0 退出码即不通过
 ├── probe_startup.py     真启动探针 G8（支持 --clean-clone / --build）
 ├── publish_github.py    建仓库并推 main（只允许快进，拒绝强推）
-└── repo_rules.py        出题容量口径的冻结快照
+└── repo_rules.py        冻结快照：容量口径 + 严禁题域清单
 references/
-├── hard-rules.md        闸门口径、容量推导、推送安全边界
-└── spec-format.md       spec 字段说明与怎么写出撑得起 30 条的题域
+├── hard-rules.md        闸门口径、容量推导、严禁题域、推送安全边界
+└── spec-format.md       spec 字段说明、严禁题域、怎么写出撑得起 30 条的题域
 examples/
-└── spec-park-pass.json  默认题域：园区通行与安全运营平台（18 个业务模块）
-tests/                   29 条自测，含各闸门的负例
+└── spec-film-production.json  默认题域：影视剧组拍摄制作管理平台（20 个业务模块）
+tests/                   56 条自测，含各闸门的负例
+└── fixtures/            历史反例：园区通行 spec（含工单/库存/权限/预约，现已被拒）
 ```
 
 ## 自测
