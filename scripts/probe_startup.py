@@ -141,6 +141,34 @@ def detect_ports(repo: Path, backend_dir: Path | None, frontend_dir: Path | None
     return backend_port, frontend_port
 
 
+def discover_business_endpoints(backend_dir: Path | None) -> list[str]:
+    """从仓库里找出可探的业务接口，避免把某个题域的模块名写死。
+
+    先扫 Python 后端的 app/routers/*.py 里的 APIRouter(prefix="/api/xxx")，
+    再扫 Java 后端的 @RequestMapping("/api/xxx")；都扫不到时退回 /api/visitor
+    （默认 spec 的模块），保证老仓库的行为不变。
+    """
+    found: list[str] = []
+    if backend_dir:
+        routers = backend_dir / "app" / "routers"
+        if routers.is_dir():
+            for path in sorted(routers.glob("*.py")):
+                if path.stem == "__init__":
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+                for match in re.findall(r"prefix\s*=\s*[\"']([^\"']+)[\"']", text):
+                    if match not in found:
+                        found.append(match)
+        java_root = backend_dir / "src" / "main" / "java"
+        if java_root.is_dir():
+            for path in sorted(java_root.rglob("*.java")):
+                text = path.read_text(encoding="utf-8", errors="replace")
+                for match in re.findall(r"@RequestMapping\(\s*[\"']([^\"']+)[\"']", text):
+                    if match not in found:
+                        found.append(match)
+    return found or ["/api/visitor"]
+
+
 def run_clean_clone(repo: Path, args) -> int:
     """在干净克隆里跑完整探针：证明仓库不依赖任何未提交的本地残留。
 
@@ -295,9 +323,17 @@ def main() -> int:
                     status, body = http_get(f"{base}/api/overview")
                     record("后端 /api/overview 有数据", status == 200 and "modules" in body,
                            f"status={status} body={body[:200]}")
-                    status, body = http_get(f"{base}/api/visitor")
+                    endpoints = discover_business_endpoints(backend_dir)
+                    probed = ("", 0, "")
+                    for endpoint in endpoints:
+                        status, body = http_get(f"{base}{endpoint}")
+                        probed = (endpoint, status, body)
+                        if status == 200 and "items" in body:
+                            break
+                    endpoint, status, body = probed
                     record("后端业务接口可访问", status == 200 and "items" in body,
-                           f"status={status} body={body[:200]}")
+                           f"{endpoint} status={status} body={body[:200]}"
+                           + ("" if len(endpoints) <= 1 else f"（共试了 {len(endpoints)} 个候选）"))
         elif backend["kind"] == "java":
             if shutil.which("mvn") is None or shutil.which("java") is None:
                 record("Java 后端启动", False,

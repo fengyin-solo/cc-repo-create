@@ -24,6 +24,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import repo_rules as rules  # noqa: E402
 import publish_github as publisher  # noqa: E402
+import probe_startup as probe  # noqa: E402
 import scaffold_repo as scaffold_mod  # noqa: E402
 import verify_repo as verifier  # noqa: E402
 
@@ -498,6 +499,48 @@ class NumberingTest(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["project"]["project_id"], "YEL12345")
         self.assertEqual(payload["project"]["number"], 12345)
+
+
+class ProbeEndpointDiscovery(unittest.TestCase):
+    """探针不该把业务接口写死成默认 spec 的 /api/visitor，而要从仓库里自己找。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="probe-discovery-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_python_routers_are_discovered_and_init_is_skipped(self):
+        routers = self.tmp / "backend" / "app" / "routers"
+        routers.mkdir(parents=True)
+        (routers / "__init__.py").write_text('prefix = "/api/__init__"\n', encoding="utf-8")
+        (routers / "waybill.py").write_text(
+            'router = APIRouter(prefix="/api/waybill")\n', encoding="utf-8")
+        (routers / "order.py").write_text(
+            "router = APIRouter(prefix='/api/order')\n", encoding="utf-8")
+        found = probe.discover_business_endpoints(self.tmp / "backend")
+        self.assertEqual(found, ["/api/order", "/api/waybill"])
+
+    def test_java_request_mapping_is_discovered(self):
+        java = self.tmp / "backend" / "src" / "main" / "java" / "com" / "demo"
+        java.mkdir(parents=True)
+        (java / "ColdOrderController.java").write_text(
+            '@RequestMapping("/api/order")\n', encoding="utf-8")
+        found = probe.discover_business_endpoints(self.tmp / "backend")
+        self.assertEqual(found, ["/api/order"])
+
+    def test_falls_back_to_default_spec_key_when_nothing_is_found(self):
+        self.assertEqual(probe.discover_business_endpoints(None), ["/api/visitor"])
+        empty = self.tmp / "backend"
+        empty.mkdir()
+        self.assertEqual(probe.discover_business_endpoints(empty), ["/api/visitor"])
+
+    def test_generated_default_spec_repo_is_still_probed_at_visitor(self):
+        target = self.tmp / "default-spec-repo"
+        generate(target, "--spec", str(SPEC))
+        found = probe.discover_business_endpoints(target / "backend")
+        self.assertIn("/api/visitor", found)
+        self.assertEqual(found, sorted(found))
 
 
 if __name__ == "__main__":
