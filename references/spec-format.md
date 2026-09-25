@@ -97,7 +97,7 @@ python3 <skill>/scripts/scaffold_repo.py --check-spec --spec /path/to/spec.json
 ## 生成出来的目录
 
 ```text
-<父目录>/<项目编号>/         例如 cc10001 / YEL10003，编号规则见 SKILL.md「项目编号」
+<父目录>/<项目编号>/<项目编号>/         例如 cc10001/cc10001、YEL10003/YEL10003
 ├── frontend/                 Vue 3 或 React + Vite + TypeScript
 │   ├── src/views/<key>/index.vue|tsx   每个模块一个页面（主体 = <key>）
 │   ├── src/router/index.ts             React 走 src/App.tsx
@@ -115,6 +115,11 @@ python3 <skill>/scripts/scaffold_repo.py --check-spec --spec /path/to/spec.json
 ├── docker-compose.yml
 └── Makefile
 ```
+
+**外面那层 `<项目编号>` 是任务容器，里面那层才是仓库根**：`.git`、`.gitignore`、`frontend/`、
+`backend/` 全在内层。`scaffold_repo.py --parent` 的输出里 `out` / `repo_root` 指内层、
+`project.container` 指外层；`verify_repo.py`、`probe_startup.py`、`publish_github.py` 的
+`--repo` 都传内层那个路径。用 `--out` 显式给路径时不套这一层，给的路径就是仓库根。
 
 ## Java 后端的额外前提
 

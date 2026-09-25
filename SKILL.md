@@ -1,6 +1,6 @@
 ---
 name: cc-repo-create
-description: "生成可直接出题、并且能直接交付的全栈代码仓库：前端 Vue 或 React + 后端 Java 或 Python，基础环境自洽（能编译、依赖声明齐、无写死路径）、在干净克隆里真装依赖真起服务真打开页面，前端 dev server 关掉自动打开页面，根目录带覆盖依赖/缓存/构建产物的 .gitignore，源码 >= 2000 行，按「主体 × 需求模式」算出的出题容量 >= 30 条，不含代码理解这类禁用题型，准备好后把仓库建成 GitHub 仓库并推送 main 分支（只允许快进、拒绝强推）。自带生成器、静态验收器、干净克隆启动探针与推送脚本（含 React/Java 变体与闸门自测），被单独拿到别的机器也能跑，不依赖任何其他 skill。"
+description: "生成可直接出题、并且能直接交付的全栈代码仓库：前端 Vue 或 React + 后端 Java 或 Python，基础环境自洽（能编译、依赖声明齐、无写死路径）、在干净克隆里真装依赖真起服务真打开页面，前端 dev server 关掉自动打开页面，根目录带覆盖依赖/缓存/构建产物的 .gitignore，源码 >= 2000 行，按「主体 × 需求模式」算出的出题容量 >= 30 条，不含代码理解这类禁用题型。一条链跑到「仓库已经在 GitHub 上」为止（生成 -> 静态验收 -> 干净克隆真启动 -> 建仓库推 main），本地固定落在 <父目录>/<编号>/<编号>/ 两层。自带生成器、静态验收器、干净克隆启动探针、推送脚本与一条命令跑完的驱动（含 React/Java 变体与闸门自测），被单独拿到别的机器也能跑，不依赖任何其他 skill。"
 ---
 
 # 全栈代码仓库生成（出题底座）
@@ -50,6 +50,50 @@ description: "生成可直接出题、并且能直接交付的全栈代码仓库
 
 ## 标准流程
 
+**默认一条链跑到「仓库已经在 GitHub 上」为止**：定 spec → 生成 → 静态验收 →
+干净克隆真启动验收 → 推 GitHub。中途不把活交回给人：跑完生成不要停下等确认，
+验收跑完不要停下等确认，一直推到远端 `main` 对上本地 HEAD 才算完。
+只有用户明确说「先别推 / 只造本地」时才停在本地验收。
+
+**首选一条命令跑完**（多份 spec 按顺序跑完，最后一步真的推）：
+
+```bash
+python3 <skill>/scripts/run_pipeline.py \
+  --parent "/path/to/父目录" \
+  --spec /path/to/a.json --spec /path/to/b.json \
+  --publish --confirm PUBLISH
+```
+
+- 不加 `--publish` 就是本地预演：生成 + 验收，不碰远端。
+- 每步打印一行进度，最后给一份汇总 JSON（含 `project_id` / `repo_root` / `capacity` /
+  `repo_url` / `visibility_after` / `remote_matches_local`）。
+- 任何一步没过**默认立刻停**，退出码非 0；要硬撑着跑完剩下的 spec 才加 `--keep-going`。
+- 快速通道 `--skip-probe` 只跳过真启动那一步，**交付前不许用**。
+
+### 长任务怎么盯（硬性要求）
+
+真启动验收里每份 spec 都要现场 `npm install` + `pip install`，一批 6 份就是十几分钟，
+必须当成必须等完的长任务处理：
+
+1. **放后台跑，但不要走开。** 用后台任务跑生成 / 探针 / 推送，拿到 task_id 后**持续等到
+   它结束**，不要因为「还没出结果」就把回合交回去。
+2. **轮询要有终点。** 用阻塞式读取（`TaskOutput` 带 `block=true` 与足够大的 timeout），
+   或者干脆用一个「等产物写齐再返回」的命令把等待收敛掉，例如：
+
+   ```bash
+   # 等到 6 份探针报告都写完再继续
+   for i in $(seq 1 90); do
+     n=$(ls .probe-reports/cc1*.json 2>/dev/null | wc -l | tr -d ' ')
+     [ "$n" -ge 6 ] && break
+     sleep 2
+   done
+   ```
+
+3. **只有三种情况可以把回合交回去**：全部跑完、真的被卡住（报清楚卡在哪一步、要人做什么）、
+   用户中途插话。除此之外一律继续往下推。
+4. **收尾必须自己复核一遍**，不要只信脚本自报：直接读远端（`gh repo view` 的
+   `visibility` + `git ls-remote ... refs/heads/main`）跟本地 HEAD 逐一对齐。
+
 ### 1. 定 spec
 
 复制一份 `examples/spec-film-production.json`，改题域与业务模块。**模块数 >= 16**，
@@ -80,6 +124,17 @@ python3 <skill>/scripts/scaffold_repo.py --parent /path/to/父目录 --spec /pat
 输出里带 `modules` / `files` / `lines_written`，以及下一步该跑的验收命令。
 `--git-init` 会顺手 `git init` 并做一次提交，便于后面用 `git check-ignore` 实测忽略规则。
 编号规则见下面「项目编号」一节。
+
+**本地目录固定套两层**（`--parent` 模式）：外层 `<编号>` 是任务容器，内层 `<编号>` 才是仓库根。
+
+```text
+<父目录>/cc10001/            ← 任务容器（放探针日志、依赖种子等周边产物）
+<父目录>/cc10001/cc10001/    ← 仓库根：.git / frontend / backend / README.md / .gitignore
+```
+
+生成结果里 `out` 与 `repo_root` 都是内层那个（仓库根），`project.container` 是外层容器；
+后面 `verify_repo.py` / `probe_startup.py` / `publish_github.py` 的 `--repo` 一律指向**内层**。
+编号扫描仍看外层目录名，所以「往后排编号」的行为不受影响。
 
 ### 3. 静态验收
 
@@ -160,6 +215,9 @@ private 会直接把出题链路卡住。脚本不靠「建的时候传了 publi
 <前缀 2~4 个字母><5 位数>      5 位数首位固定是 1（10001~19999）
 cc10001、cc10002、YEL10003 …
 ```
+
+落到磁盘上是 `<父目录>/<编号>/<编号>/`（外层容器 + 内层仓库根，见上面「生成」一节）；
+GitHub 仓库名只取编号，不带外层那层，两边不会对不上。
 
 - **前缀默认 `cc`**，`--prefix YEL` 就得到 `YEL10001`；**大小写按传入的原样用**
   （想要大写就传 `CC`，想要小写就传 `cc`）。
@@ -265,18 +323,22 @@ python3 <skill>/scripts/verify_repo.py --banned-drift <check_repo.py 的路径>
 python3 -m unittest discover -s <skill>/tests -v
 ```
 
-56 条用例：生成出来的仓库要过全部闸门；把 `open: false` 改成 `true`、删掉 `.gitignore`、
+61 条用例：生成出来的仓库要过全部闸门；把 `open: false` 改成 `true`、删掉 `.gitignore`、
 塞一个硬编码密钥、写死一个本机绝对路径、漏声明一个依赖、把 `true` 当 Python 变量用、
 把模块砍到 3 个、把主体砍到 2 个，闸门都必须拦下；依赖目录落地后必须被 `git check-ignore`
 命中；React + Java 变体也要过；推送链路要覆盖「dry-run 不碰远端」「首次推 main」
 「重复推是 up-to-date」「新提交快进」「远端分叉拒推」「脏工作区拒推」「不是 git 仓库报错」。
 编号链路要覆盖「空目录从 10001 起」「按已有编号往后排」「换前缀不重置序号」「大小写保持」
-「GitHub 占用时往后跳」「查不了 GitHub 时回退本地序号」「显式编号冲突就报错」「编号封顶」。
+「GitHub 占用时往后跳」「查不了 GitHub 时回退本地序号」「显式编号冲突就报错」「编号封顶」
+「`--parent` 落在 `<编号>/<编号>` 两层、仓库根不能直接落在外层容器上」。
 可见性链路要覆盖「已经是 public 就不动」「private 会被改成 public」「dry-run 只计划不改」
 「改完还是 private 要报错」「读不到可见性不阻塞」。
 严禁题域链路要覆盖「出厂默认 spec 永远干净」「旧的园区 spec 现在生成不了」「禁用词只出现在
 业务字段/应用描述里也要拦」「被拒的 spec 不落目录」「README 命中要拦」「只有源码命中也要拦」
 「仓库目录名命中要拦」「干净仓库报未命中」「清单漂移能比出来」「对方没有这份表时不误判」。
+驱动链路（`run_pipeline.py`）要覆盖「生成 + 静态验收跑进两层目录且不推远端」「没带
+`--confirm PUBLISH` 就拒绝推且不落目录」「第一份 spec 被拒就停」「`--keep-going` 会跑完剩下的」
+「推到远端后远端 `main` 的 SHA 等于本地 HEAD」。
 
 改了 `scaffold_repo.py` / `verify_repo.py` / `repo_rules.py` / `probe_startup.py` /
-`publish_github.py` 先跑它，再动真实仓库。
+`publish_github.py` / `run_pipeline.py` 先跑它，再动真实仓库。

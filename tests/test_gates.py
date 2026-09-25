@@ -482,7 +482,16 @@ class NumberingTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr[-500:])
         payload = json.loads(result.stdout)
         self.assertEqual(payload["project"]["project_id"], "cc10001")
-        self.assertTrue((out / "cc10001" / ".gitignore").is_file())
+        # 外层 <编号> 是任务容器，内层 <编号> 才是仓库根
+        self.assertEqual(Path(payload["project"]["container"]), (out / "cc10001").resolve())
+        self.assertEqual(Path(payload["out"]), (out / "cc10001" / "cc10001").resolve())
+        self.assertEqual(Path(payload["repo_root"]), (out / "cc10001" / "cc10001").resolve())
+        self.assertTrue((out / "cc10001" / "cc10001" / ".gitignore").is_file())
+        self.assertTrue((out / "cc10001" / "cc10001" / ".git").is_dir())
+        self.assertTrue((out / "cc10001" / "cc10001" / "frontend").is_dir())
+        self.assertTrue((out / "cc10001" / "cc10001" / "backend").is_dir())
+        # 仓库根不能直接落在外层容器上
+        self.assertFalse((out / "cc10001" / ".gitignore").exists())
 
         second = subprocess.run(
             [sys.executable, str(SCRIPTS / "scaffold_repo.py"),
@@ -731,6 +740,95 @@ class BannedTopics(unittest.TestCase):
         result = verifier.rules_drift(fake)
         self.assertTrue(result["ok"], msg=result["diffs"])
         self.assertEqual(result["their_banned_keywords"], "absent")
+
+
+class PipelineTest(unittest.TestCase):
+    """一条命令跑到底的驱动：生成 -> 静态验收 -> 真启动 -> 推 GitHub。
+
+    这里只覆盖不联网的部分（生成 / 静态验收 / 停止策略 / 推送闸门）；
+    真启动与真推送由 probe_startup.py / publish_github.py 自己的用例负责。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="cc-repo-create-pipeline-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def pipeline(self, *extra: str):
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS / "run_pipeline.py"), "--parent", str(self.tmp / "gen"),
+             "--no-github-check", "--skip-probe", *extra],
+            capture_output=True, text=True, check=False)
+
+    def test_pipeline_runs_generate_and_verify_into_nested_layout(self):
+        result = self.pipeline("--spec", str(SPEC))
+        self.assertEqual(result.returncode, 0, msg=result.stdout[-800:] + result.stderr[-400:])
+        report = json.loads(result.stdout[result.stdout.index("{"):])
+        self.assertTrue(report["ok"])
+        self.assertFalse(report["published"], "没加 --publish 就不该推")
+        self.assertEqual(report["specs_done"], 1)
+
+        repo = report["repos"][0]
+        self.assertEqual(repo["project_id"], "cc10001")
+        self.assertEqual(repo["steps"]["推送 GitHub"], "skipped")
+        self.assertTrue(repo["steps"]["静态验收"])
+        self.assertGreaterEqual(repo["capacity"], 30)
+        # 仓库根必须落在第二层 <编号>/<编号>
+        self.assertTrue(repo["repo_root"].endswith("cc10001/cc10001"))
+        self.assertTrue((self.tmp / "gen" / "cc10001" / "cc10001" / ".gitignore").is_file())
+        self.assertTrue((self.tmp / "gen" / "cc10001" / "cc10001" / ".git").is_dir())
+
+    def test_pipeline_refuses_publish_without_confirmation(self):
+        result = self.pipeline("--spec", str(SPEC), "--publish")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--confirm PUBLISH", result.stderr)
+        self.assertFalse((self.tmp / "gen").exists(), "参数被拒时不该落下任何仓库")
+
+    def test_pipeline_stops_early_when_a_spec_is_refused(self):
+        """第一份命中严禁题域就停，默认不硬撑着跑后面那份。"""
+        result = self.pipeline("--spec", str(BANNED_SPEC), "--spec", str(SPEC))
+        self.assertNotEqual(result.returncode, 0)
+        report = json.loads(result.stdout[result.stdout.index("{"):])
+        self.assertFalse(report["ok"])
+        self.assertTrue(report["stopped_early"])
+        self.assertEqual(report["specs_done"], 1)
+        self.assertEqual(report["repos"][0]["failed_step"], "生成")
+        # 失败原因要带上命中点（reason 会截断，认关键字即可）
+        self.assertIn("库存", report["repos"][0]["reason"])
+        # 被拒的 spec 不落目录，第二份也没被生成
+        self.assertFalse((self.tmp / "gen" / "cc10002").exists())
+
+    def test_pipeline_keep_going_runs_the_rest(self):
+        result = self.pipeline("--spec", str(BANNED_SPEC), "--spec", str(SPEC), "--keep-going")
+        self.assertNotEqual(result.returncode, 0)
+        report = json.loads(result.stdout[result.stdout.index("{"):])
+        self.assertEqual(report["specs_done"], 2)
+        self.assertFalse(report["stopped_early"])
+        self.assertFalse(report["repos"][0]["ok"])
+        self.assertTrue(report["repos"][1]["ok"])
+
+    def test_pipeline_publishes_to_a_remote_and_confirms_sha(self):
+        """推送这一步真的接上了：推到本地裸仓库，远端 main 的 SHA 必须等于本地 HEAD。"""
+        bare = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+        result = self.pipeline("--spec", str(SPEC), "--publish", "--confirm", "PUBLISH",
+                               "--remote-url", str(bare))
+        self.assertEqual(result.returncode, 0, msg=result.stdout[-1200:])
+        report = json.loads(result.stdout[result.stdout.index("{"):])
+        self.assertTrue(report["published"])
+        repo = report["repos"][0]
+        self.assertTrue(repo["ok"])
+        self.assertTrue(repo["steps"]["推送 GitHub"])
+        self.assertTrue(repo["remote_matches_local"])
+
+        remote_sha = subprocess.run(
+            ["git", "--git-dir", str(bare), "rev-parse", "main"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        local_sha = subprocess.run(
+            ["git", "-C", repo["repo_root"], "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(remote_sha, local_sha)
 
 
 if __name__ == "__main__":

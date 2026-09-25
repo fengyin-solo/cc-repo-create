@@ -58,11 +58,12 @@
      --spec <skill>/examples/spec-film-production.json --git-init
    ```
 
-2. **`<skill>` 要展开成绝对路径**，因为 `--parent` 模式下脚本不假设 cwd：
+2. **`<skill>` 要展开成绝对路径**，因为 `--parent` 模式下脚本不假设 cwd。
+   注意 `--parent` 生成的是**两层** `<编号>/<编号>`，`--repo` 要传内层那个仓库根：
 
    ```bash
    python3 ~/.kunlunxiaozhi/skills/cc-repo-create/scripts/verify_repo.py \
-     --repo "/Users/fengyin/项目/字节/ccGsb/任务目录 2/cc10001"
+     --repo "/Users/fengyin/项目/字节/ccGsb/任务目录 2/cc10001/cc10001"
    ```
 
 3. **推 GitHub** 用本机已登录的 `gh`（账号 `fengyin-solo`），默认 owner 会自动取到它，

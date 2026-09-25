@@ -2379,7 +2379,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="生成一个满足硬性要求的全栈代码仓库")
     target = parser.add_mutually_exclusive_group(required=False)
     target.add_argument("--out", help="输出目录的完整路径（必须为空或不存在）")
-    target.add_argument("--parent", help="父目录：按项目编号建 <父目录>/<前缀><5 位数>，例如 cc10001")
+    target.add_argument("--parent", help="父目录：按项目编号建 <父目录>/<前缀><5 位数>/<前缀><5 位数>，外层是任务容器、内层才是仓库根，例如 cc10001/cc10001")
     parser.add_argument("--spec", help=f"题库 spec json；默认用 examples/{DEFAULT_SPEC_NAME}")
     parser.add_argument("--check-spec", action="store_true",
                         help="只读 spec、校验格式并扫严禁题域，打印报告后退出，不生成任何目录")
@@ -2431,7 +2431,11 @@ def main() -> int:
         owner = resolve_owner(args.owner) if check_github else args.owner
         project = pick_project_id(parent, args.prefix, explicit_number=args.number,
                                   owner=owner, check_github=check_github)
-        out = parent / str(project["project_id"])
+        # 多套一层：外层 <编号> 是任务容器，内层 <编号> 才是仓库根。
+        # 即 <父目录>/cc10001/cc10001/{frontend,backend,...}
+        container = parent / str(project["project_id"])
+        out = container / str(project["project_id"])
+        project["container"] = str(container)
         if not project.get("github_checked") and check_github:
             project["github_check_note"] = "没能查 GitHub（gh 未安装 / 未登录 / 未解析到 owner），只按本地目录排的编号"
     else:
@@ -2450,7 +2454,9 @@ def main() -> int:
                         "commit", "-q", "-m", "chore: 初始化全栈项目骨架"], cwd=out, check=True)
 
     print(json.dumps({
+        "ok": True,
         "out": str(out),
+        "repo_root": str(out),
         "project": project,
         "app_name": spec["app_name"],
         "frontend": spec["frontend"],

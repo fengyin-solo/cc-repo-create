@@ -8,19 +8,20 @@
 ## 产出长什么样
 
 ```text
-cc10001/
-├── frontend/                Vue 3 或 React + Vite + TypeScript
-│   ├── src/views/<模块>/     每个业务模块一个页面
-│   ├── src/router/           路由
-│   └── vite.config.ts        server.open = false（不自动打开页面）
-├── backend/                 FastAPI（Python）或 Spring Boot（Java 17）
-│   ├── app/routers/<模块>.py  每个模块一组接口
-│   ├── app/services/<模块>.py 状态流转与字段校验
-│   └── app/store.py          内存仓库 + 示例数据
-├── .gitignore               依赖 / 缓存 / 构建产物 / 日志 / 环境文件全覆盖
-├── README.md
-├── docker-compose.yml
-└── Makefile
+cc10001/                     ← 任务容器（外层，放探针日志等周边产物）
+└── cc10001/                 ← 仓库根（内层，就是 GitHub 上的那个仓库）
+    ├── frontend/                Vue 3 或 React + Vite + TypeScript
+    │   ├── src/views/<模块>/     每个业务模块一个页面
+    │   ├── src/router/           路由
+    │   └── vite.config.ts        server.open = false（不自动打开页面）
+    ├── backend/                 FastAPI（Python）或 Spring Boot（Java 17）
+    │   ├── app/routers/<模块>.py  每个模块一组接口
+    │   ├── app/services/<模块>.py 状态流转与字段校验
+    │   └── app/store.py          内存仓库 + 示例数据
+    ├── .gitignore               依赖 / 缓存 / 构建产物 / 日志 / 环境文件全覆盖
+    ├── README.md
+    ├── docker-compose.yml
+    └── Makefile
 ```
 
 ## 硬性要求（全部机器复核，不靠人眼）
@@ -41,22 +42,36 @@ cc10001/
 
 ## 用法
 
+**默认一条链跑到「仓库已经在 GitHub 上」为止**，首选一条命令（多份 spec 一次跑完并推送）：
+
+```bash
+python3 scripts/run_pipeline.py \
+  --parent <父目录> \
+  --spec <a.json> --spec <b.json> \
+  --publish --confirm PUBLISH
+```
+
+不加 `--publish` 就是本地预演（生成 + 验收，不碰远端）。任何一步没过默认立刻停，
+要硬撑着跑完剩下的才加 `--keep-going`。拆开单步跑也可以：
+
 ```bash
 # 0) 定完 spec 先自检题域（命中 0731 严禁出题清单就换方向，没有绕过参数）
 python3 scripts/scaffold_repo.py --check-spec --spec <spec.json>
 
-# 1) 生成（按项目编号自动命名：cc10001 / cc10002 / YEL10003 …）
+# 1) 生成（按项目编号自动命名：cc10001/cc10001、YEL10003/YEL10003 …）
 python3 scripts/scaffold_repo.py --parent <父目录> --spec <spec.json> --git-init
 
 # 2) 静态验收
-python3 scripts/verify_repo.py --repo <仓库>
+python3 scripts/verify_repo.py --repo <仓库根>
 
 # 3) 真启动验收（干净克隆里装依赖、起服务、打开页面、跑构建）
-python3 scripts/probe_startup.py --repo <仓库> --clean-clone --build
+python3 scripts/probe_startup.py --repo <仓库根> --clean-clone --build
 
 # 4) 推到 GitHub（默认 dry-run，确认后加 --execute --confirm PUBLISH）
-python3 scripts/publish_github.py --repo <仓库>
+python3 scripts/publish_github.py --repo <仓库根>
 ```
+
+`<仓库根>` 指内层那个 `<编号>/<编号>`，不是外层容器。
 
 **严禁题域**：题域命中 0731 严禁出题清单（游戏/图形、本地桌面工具、电商库存工单预约这类
 平台业务系统、记账看板这类数据可视化）就是废题，仓库做得再合规也没用。生成前与验收时各拦一次，
@@ -69,6 +84,7 @@ python3 scripts/publish_github.py --repo <仓库>
 ### 项目编号
 
 `--parent` 模式下，目录名与仓库名都取项目编号：`<前缀 2~4 字母><5 位数>`，5 位数首位固定是 1。
+落到磁盘上是 `<父目录>/<编号>/<编号>/`：外层是任务容器，内层才是仓库根，GitHub 仓库名只取编号。
 
 - 前缀默认 `cc`，`--prefix YEL` 得到 `YEL10001`；大小写按传入原样使用。
 - 编号接着当前目录已有的往后排，换前缀不重置序号。
@@ -79,6 +95,7 @@ python3 scripts/publish_github.py --repo <仓库>
 ```text
 SKILL.md                 skill 正文（工作流 + 硬规则）
 scripts/
+├── run_pipeline.py      一条命令跑完：生成 -> 静态验收 -> 真启动 -> 推 GitHub
 ├── scaffold_repo.py     生成器：Vue / React × Python / Java 四种组合 + 编号分配
 ├── verify_repo.py       静态验收 G1–G7，非 0 退出码即不通过
 ├── probe_startup.py     真启动探针 G8（支持 --clean-clone / --build）
@@ -89,7 +106,7 @@ references/
 └── spec-format.md       spec 字段说明、严禁题域、怎么写出撑得起 30 条的题域
 examples/
 └── spec-film-production.json  默认题域：影视剧组拍摄制作管理平台（20 个业务模块）
-tests/                   56 条自测，含各闸门的负例
+tests/                   61 条自测，含各闸门的负例
 └── fixtures/            历史反例：园区通行 spec（含工单/库存/权限/预约，现已被拒）
 ```
 
