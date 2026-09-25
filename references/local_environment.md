@@ -77,9 +77,8 @@
 
 ## 与远端同步（更新 / 推送）
 
-本目录已是 `https://github.com/fengyin-solo/cc-repo-create.git` 的 git 工作区：
-分支 `main` 跟踪 `origin/main`，`origin` 地址**不带 token**（认证交给本机 `gh` 与 git 凭据，
-token 不会落到 `.git/config` 里）。
+本目录已是 `git@github.com:fengyin-solo/cc-repo-create.git` 的 git 工作区：
+分支 `main` 跟踪 `origin/main`，远端走 SSH 认证（本机 `gh` 协议为 SSH，无需 token）。
 
 ```bash
 cd ~/.kunlunxiaozhi/skills/cc-repo-create
