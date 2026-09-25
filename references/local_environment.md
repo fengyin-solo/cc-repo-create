@@ -28,7 +28,7 @@
 | `node` | `~/.workbuddy/binaries/node/versions/22.22.2/bin/node` | v22.22.2 | 隔离运行时 |
 | `npm` | `~/.workbuddy/binaries/node/versions/22.22.2/bin/npm` | 10.9.7 | 生成/构建前端用它 |
 | `git` | Apple Git | 2.50.1 | 生成器的 `--git-init`、探针的 `git clone` 都靠它 |
-| `gh` | `~/.local/bin/gh` | 2.93.0 | 已登录账号 `fengyin-solo`（`gh api user -q .login` 实测返回该值） |
+| `gh` | `~/.local/bin/gh` | 2.95.0 | 已登录账号 `fengyin-solo`（`gh api user -q .login` 实测返回该值） |
 
 `python3` / `node` / `npm` 都已在 PATH 上指向隔离运行时，**直接写 `python3`、`npm` 即可**，
 不要硬编码 `/Users/...` 绝对路径（写死的路径换台机器必炸，也会被 `verify_repo.py` 拦下）。
