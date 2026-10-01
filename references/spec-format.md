@@ -37,8 +37,12 @@ python3 <skill>/scripts/scaffold_repo.py --check-spec --spec /path/to/spec.json
 - **科研检测**：实验室样品与检测、地质勘探、气象观测站网
 - **基础设施养护**：市政道路桥梁、城市地下管网、园林绿化
 - **物流作业**：冷链温控、港口集装箱作业、机场地面保障（**注意别带「库存」字样的模块**）
+- **田野记录**：考古发掘现场（探方 / 地层 / 遗迹单位 / 出土物 / 浮选 / 测年送检）
+- **防灾巡查**：地质灾害隐患点（形变与裂缝观测 / 雨量预警 / 避险搬迁 / 治理工程验收）
 
-挑域时先自问一句：**这个题域本身是不是在清单里？** 是就换，不要试图靠措辞绕开。
+已经出过的方向不要重复挑，换一批主体更划算。挑域时先自问一句：**这个题域本身是不是在清单里？**
+是就换，不要试图靠措辞绕开。另外两个高频踩点：`派工单` 里的「工单」、`天气状况` 里的「天气」，
+都会被严禁清单直接命中，写成「出工记录」「当日气候」才是换题域而不是改字眼——业务对象本身也换了。
 
 ## 顶层字段
 
@@ -48,9 +52,9 @@ python3 <skill>/scripts/scaffold_repo.py --check-spec --spec /path/to/spec.json
 | `app_slug` | ✓ | 英文短名，做包名与前端 package name；只能用字母数字与连字符 |
 | `app_desc` | ✓ | 一句话业务描述，进页面头部与 README |
 | `frontend` | | `vue`（默认）或 `react`，可被 `--frontend` 覆盖 |
-| `backend` | | `python`（默认，FastAPI）或 `java`（Spring Boot 17），可被 `--backend` 覆盖 |
+| `backend` | | `python`（默认，FastAPI）、`java`（Spring Boot 17），或 `none`（**纯前端仓库**，不生成后端）；可被 `--backend` 覆盖 |
 | `port_frontend` | | 前端端口，默认 5173 |
-| `port_backend` | | 后端端口，默认 8000 |
+| `port_backend` | | 后端端口，默认 8000（`backend: none` 时不使用） |
 | `modules` | ✓ | 业务模块数组，**至少 16 个**才能保证容量 >= 30 |
 
 ## 模块字段
@@ -71,7 +75,7 @@ python3 <skill>/scripts/scaffold_repo.py --check-spec --spec /path/to/spec.json
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `key` | ✓ | 英文小写标识；同时是目录名、接口前缀、主体名。**不能与内置名撞车后又按名字导入**（生成器已用别名导入规避，但别用 Python 关键字） |
+| `key` | ✓ | 英文小写标识；同时是目录名、接口前缀、主体名。**不能与内置名撞车后又按名字导入**（生成器已用别名导入规避，但别用 Python 关键字）；**也不能叫 `dist` / `build` / `out` / `target` / `coverage` / `logs` / `node_modules` 这些依赖与构建产物目录名**——它会变成 `frontend/src/views/<key>/`，被 `.gitignore` 吃掉，页面进不了仓库（生成前会直接拒，见 `RESERVED_MODULE_KEYS`） |
 | `name` | ✓ | 模块中文名，进页面标题与导航 |
 | `entity` | ✓ | 业务对象中文名，进按钮与提示语 |
 | `fields` | ✓ | 业务字段中文名，**至少 3 个**（既是表格列，也是主体识别要用的中文串） |
@@ -115,6 +119,29 @@ python3 <skill>/scripts/scaffold_repo.py --check-spec --spec /path/to/spec.json
 ├── docker-compose.yml
 └── Makefile
 ```
+
+**`backend` 写成 `none` 时是纯前端仓库**，上面的 `backend/` 整块不存在，
+前端多出本地数据层：
+
+```text
+├── frontend/
+│   ├── src/views/<key>/index.vue       每个模块一个页面（Vue：主体 = <key>）
+│   ├── src/views/<key>/<Key>View.tsx   React：组件落在这里（主体 = <Key>View）
+│   ├── src/views/<key>/index.tsx       React：只写一行 re-export（barrel）
+│   ├── src/api/local-service.ts        列表 / 筛选 / 动作流转 / 导出 / 概览
+│   ├── src/data/modules.ts             模块元数据：字段、状态、动作、流转目标
+│   ├── src/data/seed.ts                示例数据（每模块三行）
+│   ├── src/data/local-store.ts         localStorage 持久化
+│   ├── src/data/types.ts               公共类型
+│   └── vite.config.ts                  server.open = false，且**没有 /api 代理**
+├── .gitignore
+├── README.md
+├── docker-compose.yml                  只有 frontend 一个 service
+└── Makefile
+```
+
+`frontend/package.json` 里的 `repoKind` 字段（`fullstack` / `frontend-only`）就是形态标记，
+`verify_repo.py` 与 `probe_startup.py` 都读它，不要手工删。
 
 **外面那层 `<项目编号>` 是任务容器，里面那层才是仓库根**：`.git`、`.gitignore`、`frontend/`、
 `backend/` 全在内层。`scaffold_repo.py --parent` 的输出里 `out` / `repo_root` 指内层、

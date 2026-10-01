@@ -742,6 +742,178 @@ class BannedTopics(unittest.TestCase):
         self.assertEqual(result["their_banned_keywords"], "absent")
 
 
+class ReservedModuleKeys(unittest.TestCase):
+    """模块 key 会变成 frontend/src/views/<key>/，撞上 .gitignore 的构建产物规则就废。
+
+    真踩过：模块 key = `target`，被 .gitignore 的 `**/target/` 吃掉，页面根本没进仓库，
+    本地静态验收全绿、干净克隆里 `vue-tsc` 报 TS2307。所以生成前拦一道、验收再反向拦一道。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="cc-repo-create-reserved-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def spec_with_key(self, key: str) -> Path:
+        spec = json.loads(SPEC.read_text(encoding="utf-8"))
+        spec["modules"][0]["key"] = key
+        path = self.tmp / f"spec-{key}.json"
+        path.write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
+
+    def test_every_reserved_key_is_refused_before_writing_anything(self):
+        for key in sorted(scaffold_mod.RESERVED_MODULE_KEYS):
+            with self.subTest(key=key):
+                spec_path = self.spec_with_key(key)
+                out = self.tmp / f"repo-{key}"
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPTS / "scaffold_repo.py"),
+                     "--out", str(out), "--spec", str(spec_path)],
+                    capture_output=True, text=True, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("不能叫", result.stderr)
+                self.assertFalse(out.exists(), "被拒的 spec 不该落下任何目录")
+
+    def test_reserved_keys_are_not_a_prefix_false_positive(self):
+        """只有整段 key 相等才拒，`targets` / `building` 这类正常 key 不该被误伤。"""
+        for key in ("targets", "building", "distribution", "logging"):
+            with self.subTest(key=key):
+                spec_path = self.spec_with_key(key)
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPTS / "scaffold_repo.py"),
+                     "--check-spec", "--spec", str(spec_path)],
+                    capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+    def test_module_dir_shadowed_by_gitignore_is_rejected(self):
+        """反向检查：业务页面目录被 .gitignore 命中时，G3 必须拦下。"""
+        repo = self.tmp / "shadowed"
+        generate(repo, "--backend", "none", "--git-init")
+        shadow = repo / "frontend" / "src" / "views" / "target"
+        shadow.mkdir(parents=True)
+        (shadow / "index.vue").write_text(
+            "<template><div>受威胁对象</div></template>\n", encoding="utf-8")
+        result = verifier.verify(repo, min_lines=2000, min_capacity=30,
+                                 per_mode=rules.MAX_PER_MODE,
+                                 per_subject=rules.MAX_PER_SUBJECT)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["checks"]["gitignore"]["ok"])
+        self.assertIn("被 .gitignore 命中",
+                      " ".join(result["checks"]["gitignore"]["problems"]))
+
+    def test_generated_repo_has_no_shadowed_module_dir(self):
+        repo = self.tmp / "clean"
+        generate(repo, "--backend", "none", "--git-init")
+        result = verifier.verify(repo, min_lines=2000, min_capacity=30,
+                                 per_mode=rules.MAX_PER_MODE,
+                                 per_subject=rules.MAX_PER_SUBJECT)
+        self.assertTrue(result["ok"], msg=result["failures"])
+        self.assertTrue(result["checks"]["gitignore"]["ok"])
+
+
+class FrontendOnlyMode(unittest.TestCase):
+    """纯前端模式（backend = none）：只出 frontend/，本地数据层替代后端接口。
+
+    这条链最容易被做歪成「把后端删掉留个空壳」，所以除了「能过闸」，
+    还要逐条证明闸门没有被放水：删掉本地数据层要拦、去掉形态标记要按全栈拦。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = Path(tempfile.mkdtemp(prefix="cc-repo-create-frontend-only-"))
+        cls.vue_repo = cls.tmp / "fe-vue"
+        cls.react_repo = cls.tmp / "fe-react"
+        generate(cls.vue_repo, "--backend", "none", "--git-init")
+        generate(cls.react_repo, "--frontend", "react", "--backend", "none", "--git-init")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def verify(self, repo: Path) -> dict:
+        return verifier.verify(repo, min_lines=2000, min_capacity=30,
+                               per_mode=rules.MAX_PER_MODE, per_subject=rules.MAX_PER_SUBJECT)
+
+    def test_frontend_only_repo_passes_all_gates(self):
+        result = self.verify(self.vue_repo)
+        self.assertTrue(result["ok"], msg=result["failures"])
+        self.assertEqual(result["kind"], "frontend-only")
+        self.assertEqual(result["checks"]["structure"]["backend_dir"], "")
+        self.assertGreaterEqual(result["checks"]["code_size"]["code_lines"], 2000)
+        self.assertGreaterEqual(result["checks"]["capacity"]["capacity"], 30)
+        self.assertEqual(result["checks"]["structure"]["frontend_stack"], "vue")
+
+    def test_no_backend_directory_and_no_api_proxy(self):
+        self.assertFalse((self.vue_repo / "backend").exists())
+        self.assertFalse((self.vue_repo / "server").exists())
+        vite = (self.vue_repo / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
+        self.assertIn("open: false", vite)
+        self.assertNotIn("proxy", vite)
+        self.assertIn("纯前端", (self.vue_repo / "README.md").read_text(encoding="utf-8"))
+
+    def test_local_data_layer_is_present_and_gated(self):
+        frontend = self.vue_repo / "frontend"
+        self.assertTrue((frontend / "src" / "api" / "local-service.ts").is_file())
+        self.assertTrue((frontend / "src" / "data" / "seed.ts").is_file())
+        self.assertTrue((frontend / "src" / "data" / "modules.ts").is_file())
+        self.assertTrue((frontend / "src" / "data" / "local-store.ts").is_file())
+        self.assertFalse((frontend / "src" / "api" / "client.ts").exists(),
+                         "纯前端版不该再留 HTTP 客户端")
+
+        broken = self.tmp / "fe-broken"
+        shutil.copytree(self.vue_repo, broken, ignore=shutil.ignore_patterns(".git"))
+        (broken / "frontend" / "src" / "api" / "local-service.ts").unlink()
+        result = self.verify(broken)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["checks"]["runnable_entries"]["ok"])
+
+    def test_enough_views_for_task_types(self):
+        views = list((self.vue_repo / "frontend" / "src" / "views").rglob("index.vue"))
+        self.assertGreaterEqual(len(views), 16, "页面少于 8 个会被 G6 判成禁用题型")
+
+    def test_backend_missing_without_marker_is_still_rejected(self):
+        """全栈仓库的后端目录被删掉，不能靠「没有 backend」降级成纯前端蒙混过关。"""
+        fullstack = self.tmp / "fs-no-backend"
+        generate(fullstack)
+        shutil.rmtree(fullstack / "backend")
+        self.assertEqual(verifier.detect_repo_kind(fullstack), "fullstack")
+        result = self.verify(fullstack)
+        self.assertFalse(result["ok"])
+        self.assertIn("G1 结构", result["failures"][0])
+
+    def test_marker_removed_falls_back_to_fullstack(self):
+        """纯前端仓库去掉 repoKind 标记后，就按全栈口径验收（缺后端 → 拦下）。"""
+        copy = self.tmp / "fe-unmarked"
+        shutil.copytree(self.vue_repo, copy, ignore=shutil.ignore_patterns(".git"))
+        package_json = copy / "frontend" / "package.json"
+        payload = json.loads(package_json.read_text(encoding="utf-8"))
+        payload.pop("repoKind", None)
+        package_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                                encoding="utf-8")
+        self.assertEqual(verifier.detect_repo_kind(copy), "fullstack")
+        self.assertFalse(self.verify(copy)["ok"])
+
+    def test_explicit_kind_flag_overrides_detection(self):
+        result = verifier.verify(self.vue_repo, min_lines=2000, min_capacity=30,
+                                 per_mode=rules.MAX_PER_MODE,
+                                 per_subject=rules.MAX_PER_SUBJECT, kind="frontend-only")
+        self.assertTrue(result["ok"], msg=result["failures"])
+
+    def test_react_frontend_only_variant_passes(self):
+        result = self.verify(self.react_repo)
+        self.assertTrue(result["ok"], msg=result["failures"])
+        self.assertEqual(result["checks"]["structure"]["frontend_stack"], "react")
+        self.assertFalse((self.react_repo / "backend").exists())
+
+    def test_probe_detects_both_kinds(self):
+        self.assertEqual(probe.detect_kind(self.vue_repo), "frontend-only")
+        self.assertEqual(probe.detect_kind(self.react_repo), "frontend-only")
+        fullstack = self.tmp / "fs-for-probe"
+        generate(fullstack)
+        self.assertEqual(probe.detect_kind(fullstack), "fullstack")
+
+
 class PipelineTest(unittest.TestCase):
     """一条命令跑到底的驱动：生成 -> 静态验收 -> 真启动 -> 推 GitHub。
 
@@ -778,6 +950,19 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(repo["repo_root"].endswith("cc10001/cc10001"))
         self.assertTrue((self.tmp / "gen" / "cc10001" / "cc10001" / ".gitignore").is_file())
         self.assertTrue((self.tmp / "gen" / "cc10001" / "cc10001" / ".git").is_dir())
+
+    def test_pipeline_frontend_only_spec_runs_without_backend(self):
+        """--backend none 时整条链照样跑通，只是仓库里没有 backend/。"""
+        result = self.pipeline("--spec", str(SPEC), "--backend", "none")
+        self.assertEqual(result.returncode, 0, msg=result.stdout[-800:] + result.stderr[-400:])
+        report = json.loads(result.stdout[result.stdout.index("{"):])
+        repo = report["repos"][0]
+        self.assertTrue(repo["ok"])
+        self.assertEqual(repo["kind"], "frontend-only")
+        self.assertEqual(repo["verified_kind"], "frontend-only")
+        self.assertGreaterEqual(repo["capacity"], 30)
+        self.assertFalse((self.tmp / "gen" / "cc10001" / "cc10001" / "backend").exists())
+        self.assertTrue((self.tmp / "gen" / "cc10001" / "cc10001" / "frontend" / "package.json").is_file())
 
     def test_pipeline_refuses_publish_without_confirmation(self):
         result = self.pipeline("--spec", str(SPEC), "--publish")

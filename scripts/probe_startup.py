@@ -5,7 +5,8 @@
 
   1. 装依赖（前端 npm install，后端建 venv 装 requirements.txt；已有依赖就跳过）。
   2. 起后端，轮询 /api/health；起前端，轮询首页 HTML；再从前端端口走一次 /api/health，
-     证明 vite 代理到后端的链路通。
+     证明 vite 代理到后端的链路通。**纯前端仓库**（前端 package.json 里
+     repoKind = frontend-only）没有后端，这两步按「跳过」记录，不算失败。
   3. 无论成功失败，把起过的进程全部停掉（进程组整组杀），把证据写成 JSON。
 
 用法：
@@ -118,6 +119,23 @@ def detect_frontend(repo: Path) -> Path | None:
             if (candidate / "package.json").is_file():
                 return candidate
     return None
+
+
+def detect_kind(repo: Path) -> str:
+    """仓库形态：前端 package.json 里 repoKind = frontend-only 就是纯前端仓库。
+
+    与 verify_repo.detect_repo_kind 同一口径：显式字段，不靠「没有 backend 目录」猜。
+    """
+    frontend_dir = detect_frontend(repo)
+    if frontend_dir is None:
+        return "fullstack"
+    try:
+        payload = json.loads((frontend_dir / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "fullstack"
+    if str(payload.get("repoKind", "")).strip().lower() == "frontend-only":
+        return "frontend-only"
+    return "fullstack"
 
 
 def detect_ports(repo: Path, backend_dir: Path | None, frontend_dir: Path | None) -> tuple[int, int]:
@@ -281,6 +299,7 @@ def main() -> int:
 
     backend = detect_backend(repo)
     frontend_dir = detect_frontend(repo)
+    kind = detect_kind(repo)
     backend_dir = backend.get("dir")
     backend_port, frontend_port = detect_ports(repo, backend_dir, frontend_dir)
 
@@ -288,6 +307,7 @@ def main() -> int:
     processes: list[tuple[subprocess.Popen, Path]] = []
     result: dict[str, object] = {
         "repo": str(repo),
+        "kind": kind,
         "backend": str(backend.get("kind")),
         "backend_dir": str(backend_dir) if backend_dir else "",
         "frontend_dir": str(frontend_dir) if frontend_dir else "",
@@ -303,11 +323,17 @@ def main() -> int:
         if not passed:
             ok = False
 
+    def record_skip(name: str, detail: str, **extra: object) -> None:
+        """跳过但不算失败：纯前端仓库本来就没有后端可起。"""
+        steps.append({"step": name, "ok": True, "skipped": True, "detail": detail, **extra})
+
     live_backend_port: int | None = None
     live_frontend_port: int | None = None
     try:
         # ---------- 后端 ----------
-        if backend["kind"] == "python":
+        if kind == "frontend-only":
+            record_skip("后端启动", "纯前端仓库：没有后端服务，数据由前端本地数据层提供（跳过）")
+        elif backend["kind"] == "python":
             venv = backend_dir / ".venv"
             python_bin = venv / "bin" / "python"
             if not python_bin.exists() and not args.skip_install:
@@ -414,7 +440,10 @@ def main() -> int:
                 entry_name = "main.ts" if (frontend_dir / "src" / "main.ts").exists() else "main.tsx"
                 status, entry = http_get(f"{base}/src/{entry_name}")
                 record("前端入口脚本可加载", status == 200, f"status={status} len={len(entry)}")
-                if live_backend_port:
+                if kind == "frontend-only":
+                    record_skip("前端 -> 后端代理链路",
+                                "纯前端仓库没有后端，数据走本地数据层，不经过 vite 代理（跳过）")
+                elif live_backend_port:
                     status, body = http_get(f"{base}/api/health")
                     record("前端 -> 后端代理链路通", status == 200 and '"ok"' in body,
                            f"status={status} body={body[:200]}")

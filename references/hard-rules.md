@@ -5,14 +5,14 @@
 
 | 闸门 | 要求 | 由谁判 |
 |---|---|---|
-| G1 结构 | 前端 Vue 或 React、后端 Java 或 Python，双端各有依赖清单与启动入口 | `verify_repo.py` |
+| G1 结构 | 前端 Vue 或 React、后端 Java 或 Python，双端各有依赖清单与启动入口；纯前端仓库（`frontend/package.json` 里 `repoKind = frontend-only`）不要求后端，但必须有 `frontend/src/api/local-service.ts` 与 `frontend/src/data/*.ts` 本地数据层 | `verify_repo.py` |
 | G2 启动 | 前端 dev server 关掉「自动打开页面」 | `verify_repo.py` |
 | G3 忽略 | 根目录 `.gitignore` 覆盖依赖 / 缓存 / 构建产物 / 日志 / 环境文件 | `verify_repo.py` |
 | G4 体量 | 源码行数 >= 2000 行（不含依赖目录、构建产物、锁文件） | `verify_repo.py` |
 | G5 容量 | 出题容量 >= 30 条 | `verify_repo.py` |
 | G6 合规 | 不是禁用题型仓库，无密钥、无超大文件、无违规业务域，且题域不命中 0731 严禁出题清单 | `verify_repo.py` |
 | G7 环境 | 基础环境自洽：Python 全量可编译、后端入口能 import、依赖都声明、没有写死本机路径 | `verify_repo.py` |
-| G8 真启动 | 干净克隆里后端起得来、接口有数据、前端页面有挂载点、前端代理到后端通、生产构建通过 | `probe_startup.py` |
+| G8 真启动 | 干净克隆里后端起得来、接口有数据、前端页面有挂载点、前端代理到后端通、生产构建通过；纯前端仓库没有后端，后端与代理两步记「跳过」不算失败 | `probe_startup.py` |
 
 ## G7 基础环境自洽（专治「本地能跑、换台机器就炸」）
 
@@ -107,8 +107,9 @@ token 只以一次性 `git -c http.extraHeader=...` 传参，**不写进 `.git/c
 
 机器判据（`check_forbidden`）：
 
-- 前端页面组件少于 8 个、或后端接口文件少于 8 个 → 判「可独立出题的页面/接口太少」。
-  只有文档、只有算法片段、只有一个入口文件的仓库都会被这一条拦下。
+- 前端页面组件少于 8 个 → 判「可独立出题的页面太少」；有后端的仓库，后端接口文件少于 8 个
+  也一并判「可独立出题的接口太少」。只有文档、只有算法片段、只有一个入口文件的仓库都会被这一条拦下。
+  纯前端仓库只看页面这一条（`check_forbidden` 只在真的有 backend 目录时才数接口文件）。
 - 命中密钥特征（私钥、`AKIA...`、`ghp_...`、`sk-...`、硬编码口令）→ 拦下。
 - 命中违规业务域（赌博、色情、毒品、枪支、金融黑灰产、攻击工具）→ 拦下。
 - 单个文件超过 5MB → 拦下（产物快照会被判 too large）。
@@ -213,3 +214,32 @@ python3 scripts/verify_repo.py --banned-drift <check_repo.py 的路径>
   且不出现在 `git status --porcelain` 里——这条会被 `git check-ignore` 实测。
 - 根目录带 `docker-compose.yml`（含 `services`）、`README.md`、`Makefile`，
   方便下游按「已容器化，可一键起环境」判定环境可复现等级。
+- **模块 key 不能和依赖 / 构建产物目录撞名**：key 会变成 `frontend/src/views/<key>/`，
+  而 `.gitignore` 里有 `dist/`、`build/`、`out/`、`target/`、`**/target/`、`coverage/`、
+  `logs/`、`node_modules/` 这些规则。撞名的后果是页面被 git 忽略：本地静态验收全绿、
+  干净克隆里少一个页面、前端构建报 `TS2307: Cannot find module '@/views/<key>/index.vue'`。
+  `scaffold_repo.py` 用 `RESERVED_MODULE_KEYS` 在 spec 阶段就拒（`target` → 改成 `threat`）；
+  `verify_repo.py` 的 G3 另有**反向检查**：逐个 `frontend*/src/views/*` 目录跑
+  `git check-ignore`，被命中就报「业务模块目录被 .gitignore 命中，页面不会进仓库」。
+
+## 纯前端仓库（`--backend none`）的额外口径
+
+纯前端仓库走同一套闸门，只是三处按形态放宽/收紧：
+
+| 闸门 | 全栈 | 纯前端 |
+|---|---|---|
+| G1 结构 | 必须有 `backend/`（`app/main.py` 或 `pom.xml` + Controller） | 不要求 `backend/`；必须有 `frontend/src/api/local-service.ts` 与 `frontend/src/data/*.ts` |
+| G6 禁用题型 | 页面 >= 8 **且** 接口文件 >= 8 | 只数页面（>= 8） |
+| G8 真启动 | 后端 `/api/health`、`/api/overview`、业务接口、前端 -> 后端代理链路 | 后端与代理两步记 `skipped: true`（不计失败），前端首页/入口脚本/生产构建照验 |
+
+形态判定**不靠「有没有 backend 目录」**，而是读 `frontend/package.json` 的
+`repoKind` 字段（生成时写入 `fullstack` / `frontend-only`）。`verify_repo.py` 与
+`probe_startup.py` 都按这个字段走，也可以用 `verify_repo.py --kind frontend-only|fullstack`
+显式覆盖。这样做的原因：如果按「缺 backend 目录」自动降级，一个后端目录被误删的全栈仓库
+就能悄悄通过 G1，闸门等于失效——`tests/test_gates.py` 里有专门的反例用例守着这条。
+
+React 变体还有一条主体派生的坑：上游口径会跳过 `index.tsx` / `index.ts` / `main.tsx` 这类入口文件名，
+所以纯前端 React 的页面组件落在 `src/views/<key>/<Key>View.tsx`，`index.tsx` 只写一行
+`export { default } from './<Key>View'`（标准 barrel）。否则 18 个页面一个主体都派生不出来，
+容量会掉到 16 条。
+

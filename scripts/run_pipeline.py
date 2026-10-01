@@ -101,11 +101,13 @@ def run_one(spec_path: Path, args: argparse.Namespace, index: int, total: int) -
         "container": scaffold["project"].get("container"),
         "repo_root": str(repo_root),
         "app_name": scaffold["app_name"],
+        "kind": scaffold.get("kind"),
         "modules": scaffold["modules"],
         "lines_written": scaffold["lines_written"],
     })
     record["steps"]["生成"] = True
-    log("生成", f"{record['project_id']} {record['app_name']} -> {repo_root}")
+    log("生成", f"{record['project_id']} {record['app_name']}"
+                f"（{record['kind']}）-> {repo_root}")
 
     # 2) 静态验收
     verify = _run("静态验收", [sys.executable, str(VERIFY), "--repo", str(repo_root), "--json"])
@@ -114,8 +116,9 @@ def run_one(spec_path: Path, args: argparse.Namespace, index: int, total: int) -
     record["capacity"] = capacity.get("capacity")
     record["subject_count"] = capacity.get("subject_count")
     record["code_lines"] = (verify.get("checks", {}).get("code_size") or {}).get("code_lines")
-    log("静态验收", f"通过（出题容量 {record['capacity']} 条 / 主体 {record['subject_count']} 个 / "
-                    f"{record['code_lines']} 行）")
+    record["verified_kind"] = verify.get("kind")
+    log("静态验收", f"通过（形态 {verify.get('kind')}，出题容量 {record['capacity']} 条 / "
+                    f"主体 {record['subject_count']} 个 / {record['code_lines']} 行）")
 
     # 3) 干净克隆真启动
     if args.skip_probe:
@@ -180,7 +183,8 @@ def main() -> int:
                         help="spec json 路径，可重复传多次，按传入顺序逐个跑")
     parser.add_argument("--prefix", help="项目编号前缀，默认 cc")
     parser.add_argument("--frontend", choices=["vue", "react"])
-    parser.add_argument("--backend", choices=["python", "java"])
+    parser.add_argument("--backend", choices=["python", "java", "none"],
+                        help="none = 只生成纯前端仓库")
     parser.add_argument("--owner", help="GitHub owner，默认取 gh 当前登录账号")
     parser.add_argument("--visibility", choices=["public", "private", "internal"], default="public",
                         help="仓库可见性，默认 public（下游容器要能匿名 clone）")

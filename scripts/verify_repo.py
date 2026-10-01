@@ -11,7 +11,8 @@
 
 检查项：
 
-  G1 结构   前端（Vue/React）与后端（Java/Python）双端齐全，各有依赖清单与启动入口
+  G1 结构   前端（Vue/React）齐全；后端（Java/Python）齐全，除非是纯前端仓库
+            （前端 package.json 里 repoKind = frontend-only，此时必须有本地数据层）
   G2 启动   前端 dev server 关掉了自动打开页面
   G3 忽略   根目录 .gitignore 覆盖依赖 / 缓存 / 构建产物 / 日志 / 环境文件
   G4 体量   源码行数 >= --min-lines（默认 2000）
@@ -122,7 +123,29 @@ def count_code_lines(repo: Path) -> dict[str, object]:
     }
 
 
-def check_structure(repo: Path) -> dict[str, object]:
+def detect_repo_kind(repo: Path) -> str:
+    """仓库形态：读前端 package.json 里的 repoKind，缺省当全栈。
+
+    用显式字段而不是「没有 backend 目录就算纯前端」：后者会让「后端目录被误删的全栈仓库」
+    悄悄降级通过，闸门就没意义了。
+    """
+    candidates = [repo / name for name in ("frontend", "web", "frontend-portal")]
+    candidates += sorted(p for p in repo.iterdir()
+                         if p.is_dir() and p.name.startswith(("frontend", "web")))
+    for candidate in candidates:
+        package_json = candidate / "package.json"
+        if not package_json.is_file():
+            continue
+        try:
+            payload = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(payload.get("repoKind", "")).strip().lower() == "frontend-only":
+            return "frontend-only"
+    return "fullstack"
+
+
+def check_structure(repo: Path, kind: str = "fullstack") -> dict[str, object]:
     problems: list[str] = []
     frontend_dir = next(
         (p for p in (repo / "frontend", repo / "web", repo / "frontend-portal") if p.is_dir()),
@@ -137,7 +160,9 @@ def check_structure(repo: Path) -> dict[str, object]:
         (p for p in (repo / "backend", repo / "server", repo / "api") if p.is_dir()),
         None,
     )
-    if backend_dir is None:
+    # 纯前端仓库（frontend/package.json 里 repoKind = frontend-only）不要求后端目录；
+    # 全栈仓库少一个后端目录就是结构不完整，照样拦。
+    if backend_dir is None and kind != "frontend-only":
         problems.append("找不到后端目录（期望 backend / server / api）")
 
     frontend_stack = ""
@@ -174,6 +199,7 @@ def check_structure(repo: Path) -> dict[str, object]:
     return {
         "ok": not problems,
         "problems": problems,
+        "kind": kind,
         "frontend_dir": frontend_dir.name if frontend_dir else "",
         "frontend_stack": frontend_stack,
         "backend_dir": backend_dir.name if backend_dir else "",
@@ -194,6 +220,18 @@ def check_runnable_entries(repo: Path, structure: dict[str, object]) -> dict[str
         evidence["frontend_scripts"] = sorted(scripts)
         if "dev" not in scripts:
             problems.append("前端 package.json 没有 dev 脚本，起不了页面")
+        # 纯前端仓库的「启动入口」还包括本地数据层：没有它页面就没有数据来源。
+        if str(structure.get("kind")) == "frontend-only":
+            service = frontend_dir / "src" / "api" / "local-service.ts"
+            data_dir = frontend_dir / "src" / "data"
+            evidence["local_data_layer"] = {
+                "service": str(service.relative_to(frontend_dir)) if service.is_file() else "",
+                "data_files": sorted(p.name for p in data_dir.glob("*.ts")) if data_dir.is_dir() else [],
+            }
+            if not service.is_file():
+                problems.append("纯前端仓库缺少本地数据层 frontend/src/api/local-service.ts")
+            if not data_dir.is_dir() or not list(data_dir.glob("*.ts")):
+                problems.append("纯前端仓库缺少 frontend/src/data/ 下的本地数据定义与示例数据")
 
     if backend_dir:
         if structure["backend_stack"] == "python":
@@ -294,6 +332,19 @@ def check_gitignore(repo: Path) -> dict[str, object]:
                 untracked_ok = False
             else:
                 ignored_dirs.append(rel)
+        # 反向检查：业务页面目录**必须能进仓库**。模块 key 一旦撞上构建产物规则
+        # （例如 views/target 撞 `**/target/`），页面就不会被提交——本地看着文件都在，
+        # 干净克隆里少一个页面，前端构建直接报 TS2307。这条只能靠反向检查抓。
+        for views in sorted(repo.glob("frontend*/src/views")) + sorted(repo.glob("web*/src/views")):
+            for module_dir in sorted(path for path in views.iterdir() if path.is_dir()):
+                rel = str(module_dir.relative_to(repo))
+                result = subprocess.run(["git", "check-ignore", "-q", rel], cwd=repo,
+                                        capture_output=True, text=True)
+                if result.returncode == 0:
+                    problems.append(
+                        f"业务模块目录 {rel} 被 .gitignore 命中，页面不会进仓库："
+                        "模块 key 和依赖 / 构建产物目录撞名了，换个业务化的 key")
+                    untracked_ok = False
         status = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
                                 capture_output=True, text=True)
         tracked_junk = [
@@ -365,16 +416,23 @@ def check_forbidden(repo: Path, structure: dict[str, object]) -> dict[str, objec
 
     # 禁用题型：仓库必须能出「代码生成 / 功能迭代 / 缺陷修复 / 代码重构 / 工程化」，
     # 不能做成只能讲清楚代码怎么走的仓库（只有文档、没有可改可跑的业务代码）。
-    if structure["frontend_dir"] and structure["backend_dir"]:
+    # 纯前端仓库只看页面数；有后端的仓库接口文件也要够。
+    if structure["frontend_dir"]:
         frontend_dir = repo / str(structure["frontend_dir"])
-        backend_dir = repo / str(structure["backend_dir"])
         views = [p for p in frontend_dir.rglob("index.*") if p.suffix in {".vue", ".tsx", ".jsx"}]
-        routers = [p for p in (backend_dir / "app" / "routers").glob("*.py")] if (
-            backend_dir / "app" / "routers").is_dir() else list(backend_dir.rglob("*Controller.java"))
-        if len(views) < 8 or len(routers) < 8:
+        if len(views) < 8:
             problems.append(
-                f"可独立出题的页面/接口太少（页面 {len(views)} 个、接口文件 {len(routers)} 个）："
+                f"可独立出题的页面太少（页面 {len(views)} 个）："
                 "仓库会退化成只能出代码理解类题，必须补齐业务模块")
+        backend_name = str(structure.get("backend_dir") or "")
+        if backend_name:
+            backend_dir = repo / backend_name
+            routers = [p for p in (backend_dir / "app" / "routers").glob("*.py")] if (
+                backend_dir / "app" / "routers").is_dir() else list(backend_dir.rglob("*Controller.java"))
+            if len(routers) < 8:
+                problems.append(
+                    f"可独立出题的接口太少（接口文件 {len(routers)} 个）："
+                    "仓库会退化成只能出代码理解类题，必须补齐业务模块")
     return {
         "ok": not problems,
         "problems": problems,
@@ -726,9 +784,10 @@ def rules_drift(path: Path) -> dict[str, object]:
 
 
 def verify(repo: Path, *, min_lines: int, min_capacity: int, per_mode: int,
-           per_subject: int) -> dict[str, object]:
+           per_subject: int, kind: str = "auto") -> dict[str, object]:
+    resolved_kind = detect_repo_kind(repo) if kind == "auto" else kind
     checks: dict[str, object] = {}
-    checks["structure"] = check_structure(repo)
+    checks["structure"] = check_structure(repo, resolved_kind)
     checks["runnable_entries"] = check_runnable_entries(repo, checks["structure"])
     checks["auto_open"] = check_auto_open(repo)
     checks["gitignore"] = check_gitignore(repo)
@@ -757,6 +816,7 @@ def verify(repo: Path, *, min_lines: int, min_capacity: int, per_mode: int,
     return {
         "ok": not failures,
         "repo": str(repo),
+        "kind": resolved_kind,
         "gate_version": rules.GATE_VERSION,
         "failures": failures,
         "checks": checks,
@@ -773,6 +833,8 @@ def main() -> int:
                         help=f"每类需求模式最多出几条，默认 {rules.MAX_PER_MODE}")
     parser.add_argument("--per-subject", type=int, default=rules.MAX_PER_SUBJECT,
                         help=f"每个主体最多出几条，默认 {rules.MAX_PER_SUBJECT}")
+    parser.add_argument("--kind", choices=["auto", "fullstack", "frontend-only"], default="auto",
+                        help="仓库形态；默认 auto = 读前端 package.json 的 repoKind 字段判断")
     parser.add_argument("--rules-drift",
                         help="比对另一台机器上的 check_repo_theme.py 口径（容量/主体/需求模式）")
     parser.add_argument("--banned-drift",
@@ -798,12 +860,12 @@ def main() -> int:
         return 2
 
     result = verify(repo, min_lines=args.min_lines, min_capacity=args.min_capacity,
-                    per_mode=args.per_mode, per_subject=args.per_subject)
+                    per_mode=args.per_mode, per_subject=args.per_subject, kind=args.kind)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         status = "通过" if result["ok"] else "未通过"
-        print(f"[{status}] {result['repo']}")
+        print(f"[{status}] {result['repo']}（形态：{result['kind']}）")
         size = result["checks"]["code_size"]
         cap = result["checks"]["capacity"]
         print(f"  代码量：{size['code_lines']} 行 / {size['code_files']} 个文件")

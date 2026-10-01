@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""生成一个满足硬性要求的全栈代码仓库。
+"""生成一个满足硬性要求的代码仓库（全栈，或纯前端）。
 
 硬性要求（全部由 scripts/verify_repo.py 机器复核，别手工判断）：
 
-  1. 前端 + 后端双端齐全，前端 Vue 或 React，后端 Java 或 Python，起得来、页面有内容。
+  1. 前端 Vue 或 React；后端 Java 或 Python（`--backend none` 时只出纯前端，
+     数据走 `frontend/src/data` 下的本地数据层，不再要求后端目录）。
   2. 前端 dev server 关掉「自动打开页面」（vite 的 server.open = false）。
   3. 仓库根目录有 .gitignore，覆盖依赖、缓存、构建产物、日志、环境文件等。
   4. 源码总行数 >= 2000 行（不含依赖目录、构建产物、锁文件）。
@@ -17,6 +18,7 @@
 
     python3 scaffold_repo.py --out /path/to/repo --spec spec.json
     python3 scaffold_repo.py --out /path/to/repo --frontend react --backend java
+    python3 scaffold_repo.py --out /path/to/repo --backend none         # 纯前端仓库
     python3 scaffold_repo.py --out /path/to/repo --git-init      # 顺手 git init + 首次提交
     python3 scaffold_repo.py --check-spec --spec spec.json       # 只自检题域，不生成任何目录
 
@@ -49,6 +51,15 @@ NUMBER_FLOOR = 10001
 NUMBER_CEILING = 19999
 # 最多往后找多少个编号：本地 + GitHub 都占用时才会继续往后，正常不会用到这么多。
 MAX_NUMBER_PROBES = 200
+
+# 模块 key 会变成 frontend/src/views/<key>/ 的目录名。下面这些名字在生成的 .gitignore 里
+# 是依赖 / 构建产物规则（`dist/`、`target/`、`**/target/`…），撞名会让整个模块的页面被 git
+# 忽略：本地看着文件都在，干净克隆里少一个页面，前端构建直接报 TS2307。真踩过一次
+# （模块 key = target，被 `**/target/` 吃掉），所以在 spec 阶段就禁止，不留到探针才发现。
+RESERVED_MODULE_KEYS = frozenset({
+    "node_modules", "dist", "build", "out", "target", "coverage", "logs",
+    "classes", "eggs", "env", "venv", "__pycache__",
+})
 
 
 def validate_prefix(prefix: str) -> str:
@@ -231,8 +242,9 @@ def load_spec(path: Path | None, frontend: str | None, backend: str | None) -> d
     spec.setdefault("backend", "python")
     if spec["frontend"] not in {"vue", "react"}:
         raise SystemExit(f"前端只支持 vue / react，收到 {spec['frontend']!r}")
-    if spec["backend"] not in {"python", "java"}:
-        raise SystemExit(f"后端只支持 python / java，收到 {spec['backend']!r}")
+    if spec["backend"] not in {"python", "java", "none"}:
+        raise SystemExit(
+            f"后端只支持 python / java / none（none = 纯前端仓库），收到 {spec['backend']!r}")
     modules = spec.get("modules") or []
     if not modules:
         raise SystemExit("spec 里没有任何 modules")
@@ -243,6 +255,12 @@ def load_spec(path: Path | None, frontend: str | None, backend: str | None) -> d
                 raise SystemExit(f"模块缺少字段 {field}：{module}")
         if module["key"] in seen:
             raise SystemExit(f"模块 key 重复：{module['key']}")
+        if module["key"] in RESERVED_MODULE_KEYS:
+            raise SystemExit(
+                f"模块 key 不能叫 {module['key']!r}：它会变成 frontend/src/views/"
+                f"{module['key']}/，而这个名字在生成的 .gitignore 里是依赖 / 构建产物规则，"
+                "整个模块的页面会被 git 忽略、干净克隆里少文件、前端构建直接报错。"
+                "换一个业务化的 key（例如 target 改成 threat）。")
         seen.add(module["key"])
         if len(module["fields"]) < 3:
             raise SystemExit(f"模块 {module['key']} 的 fields 少于 3 个，主体识别会不达标")
@@ -561,6 +579,7 @@ PACKAGE_JSON_VUE = """\
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "repoKind": "__REPO_KIND__",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
@@ -588,6 +607,7 @@ PACKAGE_JSON_REACT = """\
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "repoKind": "__REPO_KIND__",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -1267,6 +1287,768 @@ export default function Dashboard() {
 ENV_DEVELOPMENT = """\
 VITE_API_BASE=
 VITE_APP_NAME=__APP_NAME__
+"""
+
+
+# ---------------------------------------------------------------------------
+# 纯前端（backend = none）：本地数据层 + 不接后端的页面
+#
+# 与全栈版的差别只有两处：vite 不再代理 /api，页面也不再发 HTTP，改成直接调
+# src/api/local-service.ts。数据用示例数据播种，写进浏览器 localStorage。
+# 这样「纯前端」不是把后端删掉留个空壳，而是换了一条真实的本地数据链路。
+# ---------------------------------------------------------------------------
+VITE_CONFIG_VUE_LOCAL = """\
+import { fileURLToPath, URL } from 'node:url'
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+// 纯前端应用：没有后端，也就没有 /api 代理，数据全部走 src/api/local-service.ts。
+export default defineConfig({
+  plugins: [vue()],
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+    },
+  },
+  server: {
+    host: '127.0.0.1',
+    port: __FRONTEND_PORT__,
+    // 关掉自动打开页面：起服务时只打印地址，不拉起浏览器
+    open: false,
+    strictPort: false,
+  },
+  build: {
+    outDir: 'dist',
+    sourcemap: false,
+  },
+})
+"""
+
+VITE_CONFIG_REACT_LOCAL = """\
+import { fileURLToPath, URL } from 'node:url'
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+// 纯前端应用：没有后端，也就没有 /api 代理，数据全部走 src/api/local-service.ts。
+export default defineConfig({
+  plugins: [react()],
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+    },
+  },
+  server: {
+    host: '127.0.0.1',
+    port: __FRONTEND_PORT__,
+    // 关掉自动打开页面：起服务时只打印地址，不拉起浏览器
+    open: false,
+    strictPort: false,
+  },
+  build: {
+    outDir: 'dist',
+    sourcemap: false,
+  },
+})
+"""
+
+LOCAL_TYPES_TS = """\
+/** 纯前端数据层的公共类型：与全栈版后端返回的结构保持一致，换回后端时页面不用改。 */
+
+export type EntryRow = {
+  id: number
+  status: string
+  pending: boolean
+  abnormal: boolean
+  [field: string]: string | number | boolean
+}
+
+export type ModuleMeta = {
+  key: string
+  name: string
+  entity: string
+  desc: string
+  fields: string[]
+  statuses: string[]
+  actions: string[]
+  actionTargets: Record<string, string>
+  metrics: string[]
+}
+
+export type PageResult = {
+  items: EntryRow[]
+  total: number
+  page: number
+  size: number
+}
+
+export type ActionResult = {
+  ok: boolean
+  message: string
+}
+
+export type OverviewResult = {
+  cards: { label: string; value: number }[]
+  modules: { name: string; created: number; pending: number; abnormal: number }[]
+}
+"""
+
+LOCAL_MODULES_TS = """\
+import type { ModuleMeta } from './types'
+
+// 模块元数据由仓库生成时写入：字段、状态、动作、流转目标都在这里，页面不再各自写一遍。
+__MODULE_BLOCKS__
+
+export const MODULE_BY_KEY: Map<string, ModuleMeta> = new Map(
+  MODULES.map((item) => [item.key, item]),
+)
+"""
+
+LOCAL_SEED_TS = """\
+import type { EntryRow } from './types'
+
+// 示例数据：首次打开时播种，之后浏览器里的改动优先，重置才会回到这份。
+__SEED_BLOCKS__
+"""
+
+LOCAL_STORE_TS = """\
+import { SEED_ROWS } from './seed'
+import type { EntryRow } from './types'
+
+// 本地持久化：数据放在 localStorage 里，刷新、关掉再打开都还在。
+const STORAGE_KEY = '__APP_SLUG__:entries'
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+function readStorage(): Record<string, EntryRow[]> {
+  const fallback = clone(SEED_ROWS)
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return fallback
+  }
+  const raw = window.localStorage.getItem(STORAGE_KEY)
+  if (!raw) {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(fallback))
+    return fallback
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, EntryRow[]>
+    return { ...fallback, ...parsed }
+  } catch {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(fallback))
+    return fallback
+  }
+}
+
+let cache: Record<string, EntryRow[]> | null = null
+
+export function allRows(): Record<string, EntryRow[]> {
+  if (cache === null) {
+    cache = readStorage()
+  }
+  return cache
+}
+
+export function listRows(key: string): EntryRow[] {
+  return allRows()[key] ?? []
+}
+
+export function saveRows(key: string, rows: EntryRow[]): void {
+  const next = { ...allRows(), [key]: rows }
+  cache = next
+  if (typeof window !== 'undefined' && window.localStorage) {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+  }
+}
+
+export function resetRows(key: string): EntryRow[] {
+  const rows = clone(SEED_ROWS[key] ?? [])
+  saveRows(key, rows)
+  return rows
+}
+
+export function storageKey(): string {
+  return STORAGE_KEY
+}
+"""
+
+LOCAL_SERVICE_TS = """\
+import { MODULE_BY_KEY } from '@/data/modules'
+import { allRows, listRows, resetRows, saveRows } from '@/data/local-store'
+import type { ActionResult, EntryRow, ModuleMeta, OverviewResult, PageResult } from '@/data/types'
+
+// 会写进数据的「往回走」动作：命中就把这条记录标成异常态，看板上能一眼看出来。
+const NEGATIVE_ACTIONS = ['撤销', '作废', '拒绝', '驳回', '停用', '忽略', '下线', '回滚']
+
+export function moduleMeta(key: string): ModuleMeta {
+  const meta = MODULE_BY_KEY.get(key)
+  if (!meta) {
+    throw new Error(`没有登记名为 ${key} 的业务模块`)
+  }
+  return meta
+}
+
+export function filterRows(rows: EntryRow[], filters: Record<string, string>): EntryRow[] {
+  const pairs = Object.entries(filters).filter(([, value]) => value.trim() !== '')
+  if (pairs.length === 0) {
+    return rows
+  }
+  return rows.filter((row) =>
+    pairs.every(([field, value]) => String(row[field] ?? '').includes(value.trim())),
+  )
+}
+
+export function listEntries(key: string, filters: Record<string, string> = {}): PageResult {
+  const matched = filterRows(listRows(key), filters)
+  return { items: matched, total: matched.length, page: 1, size: matched.length }
+}
+
+export function runAction(key: string, id: number, action: string): ActionResult {
+  const meta = moduleMeta(key)
+  const target = meta.actionTargets[action]
+  if (!target) {
+    return { ok: false, message: `${meta.entity}没有登记「${action}」这个动作` }
+  }
+  const rows = listRows(key)
+  const index = rows.findIndex((row) => Number(row.id) === id)
+  if (index < 0) {
+    return { ok: false, message: `没有找到编号为 ${id} 的${meta.entity}` }
+  }
+  const current = String(rows[index].status)
+  if (current === target) {
+    return { ok: false, message: `${meta.entity}已经是「${target}」，不用重复操作` }
+  }
+  const lastStatus = meta.statuses[meta.statuses.length - 1]
+  const updated: EntryRow = {
+    ...rows[index],
+    status: target,
+    pending: target !== lastStatus,
+    abnormal: NEGATIVE_ACTIONS.some((verb) => action.startsWith(verb)),
+  }
+  const next = [...rows]
+  next[index] = updated
+  saveRows(key, next)
+  return { ok: true, message: `${meta.entity}已${action}，当前状态「${target}」` }
+}
+
+export function resetModule(key: string): PageResult {
+  resetRows(key)
+  return listEntries(key)
+}
+
+export function exportEntries(key: string): { filename: string; content: string } {
+  const meta = moduleMeta(key)
+  const header = ['编号', ...meta.fields, '当前状态']
+  const lines = [header.join(',')]
+  for (const row of listRows(key)) {
+    lines.push([row.id, ...meta.fields.map((field) => row[field] ?? ''), row.status].join(','))
+  }
+  return { filename: `${meta.name}-清单.csv`, content: `\\uFEFF${lines.join('\\n')}` }
+}
+
+export function downloadEntries(key: string): void {
+  const { filename, content } = exportEntries(key)
+  const blob = new Blob([content], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  URL.revokeObjectURL(url)
+}
+
+export function loadOverview(): OverviewResult {
+  const rows = allRows()
+  const modules = [...MODULE_BY_KEY.values()].map((meta) => {
+    const entries = rows[meta.key] ?? []
+    return {
+      name: meta.name,
+      created: entries.length,
+      pending: entries.filter((row) => row.pending).length,
+      abnormal: entries.filter((row) => row.abnormal).length,
+    }
+  })
+  const cards = [
+    { label: '业务模块', value: modules.length },
+    { label: '登记总量', value: modules.reduce((sum, item) => sum + item.created, 0) },
+    { label: '待处理', value: modules.reduce((sum, item) => sum + item.pending, 0) },
+    { label: '异常量', value: modules.reduce((sum, item) => sum + item.abnormal, 0) },
+  ]
+  return { cards, modules }
+}
+"""
+
+VUE_VIEW_LOCAL = """\
+<template>
+  <section class="page" data-module="__KEY__">
+    <header class="page-head">
+      <div>
+        <h2>__NAME__管理</h2>
+        <p class="page-desc">__DESC__</p>
+      </div>
+      <div class="page-actions">
+        <button class="btn primary" type="button" @click="openCreate">登记__ENTITY__</button>
+        <button class="btn" type="button" @click="exportRows">导出__NAME__清单</button>
+      </div>
+    </header>
+
+    <div class="stat-row">
+      <article v-for="item in stats" :key="item.label" class="stat-card">
+        <span class="stat-label">{{ item.label }}</span>
+        <strong class="stat-value">{{ item.value }}</strong>
+      </article>
+    </div>
+
+    <p class="status-legend">
+      <span v-for="item in statusSummary" :key="item.status" class="legend-item">
+        {{ item.status }}：{{ item.count }}
+      </span>
+    </p>
+
+    <form class="filter-bar" @submit.prevent="reload">
+      <label v-for="field in filterFields" :key="field" class="filter-item">
+        <span>{{ field }}</span>
+        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+      </label>
+      <button class="btn" type="submit">查询</button>
+      <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
+    </form>
+
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th>当前状态</th>
+          <th>可执行动作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="row in rows" :key="String(row.id)">
+          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td>{{ row.status }}</td>
+          <td class="row-actions">
+            <button
+              v-for="action in actions"
+              :key="action"
+              class="link"
+              type="button"
+              @click="runAction(action, row)"
+            >
+              {{ action }}
+            </button>
+          </td>
+        </tr>
+        <tr v-if="!rows.length">
+          <td :colspan="columns.length + 2" class="empty-state">暂无__NAME__数据，可先登记__ENTITY__</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <footer class="page-foot">
+      <span>共 {{ total }} 条__NAME__记录</span>
+      <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
+    </footer>
+  </section>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+
+import {
+  downloadEntries,
+  listEntries,
+  moduleMeta,
+  runAction as applyAction,
+} from '@/api/local-service'
+import type { EntryRow } from '@/data/types'
+
+const meta = moduleMeta('__KEY__')
+const columns = __FIELDS__
+const actions = __ACTIONS__
+const statuses = __STATUSES__
+const stats = __METRICS__
+
+const rows = ref<EntryRow[]>([])
+const total = ref(0)
+const errorMessage = ref('')
+const filters = ref<Record<string, string>>({})
+const filterFields = columns.slice(0, 3)
+const statusSummary = computed(() =>
+  statuses.map((status: string) => ({
+    status,
+    count: rows.value.filter((row) => String(row.status) === status).length,
+  })),
+)
+
+function resetFilters() {
+  filters.value = {}
+  reload()
+}
+
+function exportRows() {
+  downloadEntries(meta.key)
+}
+
+function openCreate() {
+  errorMessage.value = '__ENTITY__登记入口尚未接入审批流'
+}
+
+function runAction(action: string, row: EntryRow) {
+  errorMessage.value = ''
+  const result = applyAction(meta.key, Number(row.id), action)
+  if (!result.ok) {
+    errorMessage.value = result.message
+    return
+  }
+  reload()
+}
+
+function reload() {
+  errorMessage.value = ''
+  try {
+    const payload = listEntries(meta.key, filters.value)
+    rows.value = payload.items
+    total.value = payload.total
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '__NAME__列表读取失败'
+  }
+}
+
+onMounted(reload)
+</script>
+"""
+
+REACT_VIEW_LOCAL = """\
+import { useCallback, useEffect, useMemo, useState } from 'react'
+
+import { downloadEntries, listEntries, moduleMeta, runAction as applyAction } from '@/api/local-service'
+import type { EntryRow } from '@/data/types'
+
+const meta = moduleMeta('__KEY__')
+const columns = __FIELDS__
+const actions = __ACTIONS__
+const statuses = __STATUSES__
+const stats = __METRICS__
+
+export default function __CLASS__View() {
+  const [rows, setRows] = useState<EntryRow[]>([])
+  const [total, setTotal] = useState(0)
+  const [errorMessage, setErrorMessage] = useState('')
+  const [filters, setFilters] = useState<Record<string, string>>({})
+  const filterFields = useMemo(() => columns.slice(0, 3), [])
+
+  const reload = useCallback(() => {
+    setErrorMessage('')
+    try {
+      const payload = listEntries(meta.key, filters)
+      setRows(payload.items)
+      setTotal(payload.total)
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : '__NAME__列表读取失败')
+    }
+  }, [filters])
+
+  useEffect(() => {
+    reload()
+  }, [reload])
+
+  function runAction(action: string, row: EntryRow) {
+    setErrorMessage('')
+    const result = applyAction(meta.key, Number(row.id), action)
+    if (!result.ok) {
+      setErrorMessage(result.message)
+      return
+    }
+    reload()
+  }
+
+  return (
+    <section className="page" data-module="__KEY__">
+      <header className="page-head">
+        <div>
+          <h2>__NAME__管理</h2>
+          <p className="page-desc">__DESC__</p>
+        </div>
+        <div className="page-actions">
+          <button className="btn primary" type="button" onClick={() => setErrorMessage('__ENTITY__登记入口尚未接入审批流')}>
+            登记__ENTITY__
+          </button>
+          <button className="btn" type="button" onClick={() => downloadEntries(meta.key)}>
+            导出__NAME__清单
+          </button>
+        </div>
+      </header>
+
+      <div className="stat-row">
+        {stats.map((item) => (
+          <article key={item.label} className="stat-card">
+            <span className="stat-label">{item.label}</span>
+            <strong className="stat-value">{item.value}</strong>
+          </article>
+        ))}
+      </div>
+
+      <p className="status-legend">
+        {statuses.map((status: string) => (
+          <span key={status} className="legend-item">
+            {status}：{rows.filter((row) => String(row.status) === status).length}
+          </span>
+        ))}
+      </p>
+
+      <form className="filter-bar" onSubmit={(event) => { event.preventDefault(); reload() }}>
+        {filterFields.map((field) => (
+          <label key={field} className="filter-item">
+            <span>{field}</span>
+            <input
+              value={filters[field] ?? ''}
+              placeholder={`按${field}检索`}
+              onChange={(event) => setFilters((prev) => ({ ...prev, [field]: event.target.value }))}
+            />
+          </label>
+        ))}
+        <button className="btn" type="submit">查询</button>
+        <button className="btn ghost" type="button" onClick={() => setFilters({})}>重置条件</button>
+      </form>
+
+      <table className="data-table">
+        <thead>
+          <tr>
+            {columns.map((column) => <th key={column}>{column}</th>)}
+            <th>当前状态</th>
+            <th>可执行动作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={String(row.id)}>
+              {columns.map((column) => <td key={column}>{row[column] ?? '—'}</td>)}
+              <td>{row.status}</td>
+              <td className="row-actions">
+                {actions.map((action) => (
+                  <button key={action} className="link" type="button" onClick={() => runAction(action, row)}>
+                    {action}
+                  </button>
+                ))}
+              </td>
+            </tr>
+          ))}
+          {rows.length === 0 && (
+            <tr>
+              <td className="empty-state" colSpan={columns.length + 2}>暂无__NAME__数据，可先登记__ENTITY__</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+
+      <footer className="page-foot">
+        <span>共 {total} 条__NAME__记录</span>
+        {errorMessage && <span className="error-text">{errorMessage}</span>}
+      </footer>
+    </section>
+  )
+}
+"""
+
+DASHBOARD_VUE_LOCAL = """\
+<template>
+  <section class="page">
+    <header class="page-head">
+      <div>
+        <h2>运营概览</h2>
+        <p class="page-desc">汇总各业务模块的关键指标，先看总量再看异常。</p>
+      </div>
+      <div class="page-actions">
+        <button class="btn" type="button" @click="refresh">重新统计</button>
+      </div>
+    </header>
+    <div class="stat-row">
+      <article v-for="card in cards" :key="card.label" class="stat-card">
+        <span class="stat-label">{{ card.label }}</span>
+        <strong class="stat-value">{{ card.value }}</strong>
+      </article>
+    </div>
+    <table class="data-table">
+      <thead>
+        <tr><th>业务模块</th><th>今日新增</th><th>待处理</th><th>异常量</th></tr>
+      </thead>
+      <tbody>
+        <tr v-for="row in moduleRows" :key="row.name">
+          <td>{{ row.name }}</td>
+          <td>{{ row.created }}</td>
+          <td>{{ row.pending }}</td>
+          <td>{{ row.abnormal }}</td>
+        </tr>
+      </tbody>
+    </table>
+    <footer class="page-foot">
+      <span>数据保存在本机浏览器里，换浏览器或清缓存会回到示例数据</span>
+    </footer>
+  </section>
+</template>
+
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+
+import { loadOverview } from '@/api/local-service'
+import type { OverviewResult } from '@/data/types'
+
+const cards = ref<OverviewResult['cards']>([])
+const moduleRows = ref<OverviewResult['modules']>([])
+
+function refresh() {
+  const payload = loadOverview()
+  cards.value = payload.cards
+  moduleRows.value = payload.modules
+}
+
+onMounted(refresh)
+</script>
+"""
+
+DASHBOARD_REACT_LOCAL = """\
+import { useCallback, useEffect, useState } from 'react'
+
+import { loadOverview } from '@/api/local-service'
+import type { OverviewResult } from '@/data/types'
+
+export default function Dashboard() {
+  const [cards, setCards] = useState<OverviewResult['cards']>([])
+  const [moduleRows, setModuleRows] = useState<OverviewResult['modules']>([])
+
+  const refresh = useCallback(() => {
+    const payload = loadOverview()
+    setCards(payload.cards)
+    setModuleRows(payload.modules)
+  }, [])
+
+  useEffect(() => {
+    refresh()
+  }, [refresh])
+
+  return (
+    <section className="page">
+      <header className="page-head">
+        <div>
+          <h2>运营概览</h2>
+          <p className="page-desc">汇总各业务模块的关键指标，先看总量再看异常。</p>
+        </div>
+        <div className="page-actions">
+          <button className="btn" type="button" onClick={refresh}>重新统计</button>
+        </div>
+      </header>
+      <div className="stat-row">
+        {cards.map((card) => (
+          <article key={card.label} className="stat-card">
+            <span className="stat-label">{card.label}</span>
+            <strong className="stat-value">{card.value}</strong>
+          </article>
+        ))}
+      </div>
+      <table className="data-table">
+        <thead>
+          <tr><th>业务模块</th><th>今日新增</th><th>待处理</th><th>异常量</th></tr>
+        </thead>
+        <tbody>
+          {moduleRows.map((row) => (
+            <tr key={row.name}>
+              <td>{row.name}</td>
+              <td>{row.created}</td>
+              <td>{row.pending}</td>
+              <td>{row.abnormal}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <footer className="page-foot">
+        <span>数据保存在本机浏览器里，换浏览器或清缓存会回到示例数据</span>
+      </footer>
+    </section>
+  )
+}
+"""
+
+LOCAL_CSS_EXTRA = """\
+.status-legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 10px; font-size: 12px; color: var(--muted); }
+.legend-item { background: #eef2f7; border-radius: 999px; padding: 2px 10px; }
+"""
+
+README_LOCAL = """\
+# __APP_NAME__
+
+__APP_DESC__
+
+这是一个**纯前端**管理平台：__FRONTEND_LABEL__，仓库里没有后端服务。业务数据由
+`frontend/src/data/` 下的本地数据层提供：首次打开用示例数据播种，之后的登记、筛选与状态流转
+结果都持久化在浏览器 `localStorage` 里，刷新或重开浏览器都还在。dev server 已关掉自动打开页面，
+启动后按终端打印的地址手工打开。
+
+## 目录结构
+
+```text
+.
+├── frontend/                 __FRONTEND_LABEL__ 前端（唯一运行单元）
+│   ├── src/views/            每个业务模块一个页面
+│   ├── src/api/local-service.ts   本地数据服务：列表、筛选、动作流转、导出
+│   ├── src/data/             模块元数据 / 示例数据 / localStorage 持久化
+│   ├── src/stores/           会话与筛选状态
+│   └── vite.config.ts        dev server 配置（open: false，无 /api 代理）
+├── .gitignore
+└── docker-compose.yml
+```
+
+## 启动
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+前端默认监听 `http://127.0.0.1:__FRONTEND_PORT__/`，dev server 不会自动打开浏览器，需要自己访问。
+
+生产构建：
+
+```bash
+cd frontend
+npm run build
+```
+
+## 业务模块
+
+__MODULE_TABLE__
+
+## 约定
+
+- 每个模块的页面在 `frontend/src/views/<模块>/index.vue`，页面只负责渲染，读写统一走
+  `frontend/src/api/local-service.ts`。
+- 字段、状态、动作与流转目标集中在 `frontend/src/data/modules.ts`；示例数据在
+  `frontend/src/data/seed.ts`。
+- 状态流转只允许在 `local-service.ts` 里改，页面组件不做业务判断。
+- 想回到初始数据：清掉浏览器里 `__STORAGE_KEY__` 这一项，或调用 `resetModule(模块)`。
+"""
+
+COMPOSE_LOCAL = """\
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "__FRONTEND_PORT__:__FRONTEND_PORT__"
+"""
+
+MAKEFILE_LOCAL = """\
+.PHONY: install frontend build
+
+install:
+\tcd frontend && npm install
+
+frontend:
+\tcd frontend && npm run dev
+
+build:
+\tcd frontend && npm run build
 """
 
 
@@ -2075,15 +2857,67 @@ def build_nav_items(modules: list[dict]) -> str:
     return f"[{body}]"
 
 
+def indent_block(text: str, spaces: int) -> str:
+    pad = " " * spaces
+    return "\n".join(pad + line if line.strip() else line for line in text.splitlines())
+
+
+def build_local_module_blocks(modules: list[dict]) -> str:
+    """纯前端版的模块元数据：字段 / 状态 / 动作 / 流转目标都落进 modules.ts。"""
+    blocks: list[str] = []
+    for module in modules:
+        flow = module_actions(module)
+        blocks.append(
+            "  {\n"
+            f"    key: {json.dumps(module['key'])},\n"
+            f"    name: {json.dumps(module['name'], ensure_ascii=False)},\n"
+            f"    entity: {json.dumps(module['entity'], ensure_ascii=False)},\n"
+            f"    desc: {json.dumps(module_desc(module), ensure_ascii=False)},\n"
+            f"    fields: {ts_array(module['fields'])},\n"
+            f"    statuses: {ts_array(flow['statuses'])},\n"
+            f"    actions: {ts_array(flow['actions'])},\n"
+            f"    actionTargets: {json.dumps(flow['rules'], ensure_ascii=False)},\n"
+            f"    metrics: {ts_array(module_metrics(module))},\n"
+            "  },"
+        )
+    return "export const MODULES: ModuleMeta[] = [\n" + "\n".join(blocks) + "\n]"
+
+
+def build_local_seed_blocks(modules: list[dict]) -> str:
+    """纯前端版的示例数据：每个模块三行，字段值与后端 seed 用同一套采样口径。"""
+    blocks: list[str] = []
+    for module in modules:
+        statuses = module_actions(module)["statuses"]
+        rows: list[dict] = []
+        for index in range(3):
+            row: dict[str, object] = {
+                "id": index + 1,
+                "status": statuses[index % len(statuses)],
+                "pending": index < 2,
+                "abnormal": index == 1,
+            }
+            for field in module["fields"]:
+                row[field] = sample_value(field, module["key"], module["name"], index)
+            rows.append(row)
+        body = indent_block(json.dumps(rows, ensure_ascii=False, indent=2), 2)
+        head, _, tail = body.partition("\n")
+        blocks.append(f"  {json.dumps(module['key'])}: {head.lstrip()}\n{tail},")
+    return "export const SEED_ROWS: Record<string, EntryRow[]> = {\n" + "\n".join(blocks) + "\n}"
+
+
 def gen_frontend_vue(spec: dict, out: Path) -> int:
     modules = spec["modules"]
+    frontend_only = spec["backend"] == "none"
     fe = out / "frontend"
     lines = 0
     files: dict[Path, str] = {}
     files[fe / "package.json"] = render(
-        PACKAGE_JSON_VUE, APP_SLUG=spec["app_slug"], FRONTEND_PORT=spec["port_frontend"])
-    files[fe / "vite.config.ts"] = render(
-        VITE_CONFIG_VUE, FRONTEND_PORT=spec["port_frontend"], BACKEND_PORT=spec["port_backend"])
+        PACKAGE_JSON_VUE, APP_SLUG=spec["app_slug"], FRONTEND_PORT=spec["port_frontend"],
+        REPO_KIND="frontend-only" if frontend_only else "fullstack")
+    files[fe / "vite.config.ts"] = (
+        render(VITE_CONFIG_VUE_LOCAL, FRONTEND_PORT=spec["port_frontend"]) if frontend_only
+        else render(VITE_CONFIG_VUE, FRONTEND_PORT=spec["port_frontend"],
+                    BACKEND_PORT=spec["port_backend"]))
     files[fe / "index.html"] = render(
         INDEX_HTML, APP_NAME=spec["app_name"], MAIN_EXT="ts")
     files[fe / "tsconfig.json"] = TSCONFIG_VUE
@@ -2095,9 +2929,21 @@ def gen_frontend_vue(spec: dict, out: Path) -> int:
     files[fe / "src/App.vue"] = render(
         APP_VUE, APP_NAME=spec["app_name"], APP_DESC=spec["app_desc"],
         NAV_ITEMS=build_nav_items(modules))
-    files[fe / "src/api/client.ts"] = CLIENT_TS
     files[fe / "src/stores/session.ts"] = render(SESSION_STORE, APP_SCOPE=spec["app_name"])
-    files[fe / "src/styles/global.css"] = GLOBAL_CSS
+    files[fe / "src/styles/global.css"] = (
+        GLOBAL_CSS + LOCAL_CSS_EXTRA if frontend_only else GLOBAL_CSS)
+
+    if frontend_only:
+        files[fe / "src/data/types.ts"] = LOCAL_TYPES_TS
+        files[fe / "src/data/modules.ts"] = render(
+            LOCAL_MODULES_TS, MODULE_BLOCKS=build_local_module_blocks(modules))
+        files[fe / "src/data/seed.ts"] = render(
+            LOCAL_SEED_TS, SEED_BLOCKS=build_local_seed_blocks(modules))
+        files[fe / "src/data/local-store.ts"] = render(
+            LOCAL_STORE_TS, APP_SLUG=spec["app_slug"])
+        files[fe / "src/api/local-service.ts"] = LOCAL_SERVICE_TS
+    else:
+        files[fe / "src/api/client.ts"] = CLIENT_TS
 
     view_imports = ["import Dashboard from '@/views/Dashboard.vue'"]
     routes = []
@@ -2109,7 +2955,7 @@ def gen_frontend_vue(spec: dict, out: Path) -> int:
             "    { path: '" + f"/{key}" + "', name: '" + key + "', component: " + cls + " },"
         )
         files[fe / f"src/views/{key}/index.vue"] = render(
-            VUE_VIEW,
+            VUE_VIEW_LOCAL if frontend_only else VUE_VIEW,
             KEY=key, NAME=module["name"], ENTITY=module["entity"],
             DESC=module_desc(module),
             FIELDS=ts_array(module["fields"]),
@@ -2127,8 +2973,9 @@ def gen_frontend_vue(spec: dict, out: Path) -> int:
     fallback_modules = json.dumps(
         [{"name": module["name"], "created": 0, "pending": 0, "abnormal": 0} for module in modules],
         ensure_ascii=False)
-    files[fe / "src/views/Dashboard.vue"] = render(
-        DASHBOARD_VUE, FALLBACK_CARDS=fallback_cards, FALLBACK_MODULES=fallback_modules)
+    files[fe / "src/views/Dashboard.vue"] = (
+        DASHBOARD_VUE_LOCAL if frontend_only
+        else render(DASHBOARD_VUE, FALLBACK_CARDS=fallback_cards, FALLBACK_MODULES=fallback_modules))
 
     for path, content in files.items():
         write(path, content)
@@ -2138,13 +2985,17 @@ def gen_frontend_vue(spec: dict, out: Path) -> int:
 
 def gen_frontend_react(spec: dict, out: Path) -> int:
     modules = spec["modules"]
+    frontend_only = spec["backend"] == "none"
     fe = out / "frontend"
     lines = 0
     files: dict[Path, str] = {}
     files[fe / "package.json"] = render(
-        PACKAGE_JSON_REACT, APP_SLUG=spec["app_slug"], FRONTEND_PORT=spec["port_frontend"])
-    files[fe / "vite.config.ts"] = render(
-        VITE_CONFIG_REACT, FRONTEND_PORT=spec["port_frontend"], BACKEND_PORT=spec["port_backend"])
+        PACKAGE_JSON_REACT, APP_SLUG=spec["app_slug"], FRONTEND_PORT=spec["port_frontend"],
+        REPO_KIND="frontend-only" if frontend_only else "fullstack")
+    files[fe / "vite.config.ts"] = (
+        render(VITE_CONFIG_REACT_LOCAL, FRONTEND_PORT=spec["port_frontend"]) if frontend_only
+        else render(VITE_CONFIG_REACT, FRONTEND_PORT=spec["port_frontend"],
+                    BACKEND_PORT=spec["port_backend"]))
     files[fe / "index.html"] = render(INDEX_HTML, APP_NAME=spec["app_name"], MAIN_EXT="tsx")
     files[fe / "tsconfig.json"] = TSCONFIG_REACT
     files[fe / ".env.development"] = render(ENV_DEVELOPMENT, APP_NAME=spec["app_name"])
@@ -2152,8 +3003,20 @@ def gen_frontend_react(spec: dict, out: Path) -> int:
         FRONTEND_DOCKERFILE, FRONTEND_PORT=spec["port_frontend"])
     files[fe / "src/main.tsx"] = MAIN_REACT
     files[fe / "src/env.d.ts"] = ENV_D_TS
-    files[fe / "src/api/client.ts"] = CLIENT_TS
-    files[fe / "src/styles/global.css"] = GLOBAL_CSS
+    files[fe / "src/styles/global.css"] = (
+        GLOBAL_CSS + LOCAL_CSS_EXTRA if frontend_only else GLOBAL_CSS)
+
+    if frontend_only:
+        files[fe / "src/data/types.ts"] = LOCAL_TYPES_TS
+        files[fe / "src/data/modules.ts"] = render(
+            LOCAL_MODULES_TS, MODULE_BLOCKS=build_local_module_blocks(modules))
+        files[fe / "src/data/seed.ts"] = render(
+            LOCAL_SEED_TS, SEED_BLOCKS=build_local_seed_blocks(modules))
+        files[fe / "src/data/local-store.ts"] = render(
+            LOCAL_STORE_TS, APP_SLUG=spec["app_slug"])
+        files[fe / "src/api/local-service.ts"] = LOCAL_SERVICE_TS
+    else:
+        files[fe / "src/api/client.ts"] = CLIENT_TS
 
     view_imports = []
     routes = []
@@ -2164,8 +3027,8 @@ def gen_frontend_react(spec: dict, out: Path) -> int:
         routes.append(
             "          <Route path=\"" + f"/{key}" + "\" element={<" + cls + "View />} />"
         )
-        files[fe / f"src/views/{key}/index.tsx"] = render(
-            REACT_VIEW,
+        view_body = render(
+            REACT_VIEW_LOCAL if frontend_only else REACT_VIEW,
             KEY=key, NAME=module["name"], ENTITY=module["entity"],
             DESC=module_desc(module), CLASS=cls,
             FIELDS=json.dumps(module["fields"], ensure_ascii=False, indent=2),
@@ -2176,13 +3039,23 @@ def gen_frontend_react(spec: dict, out: Path) -> int:
             METRICS=json.dumps([{"label": label, "value": 0} for label in module_metrics(module)],
                                ensure_ascii=False, indent=2),
         )
+        if frontend_only:
+            # 主体识别会跳过 index.tsx 这种入口名，所以组件本身落到 <Key>View.tsx，
+            # index.tsx 只做出口（标准的 React barrel 写法）。
+            files[fe / f"src/views/{key}/index.tsx"] = (
+                f"export {{ default }} from './{cls}View'\n")
+            files[fe / f"src/views/{key}/{cls}View.tsx"] = view_body
+        else:
+            files[fe / f"src/views/{key}/index.tsx"] = view_body
     fallback_cards = json.dumps(
         [{"label": "业务模块", "value": 0}, {"label": "今日新增", "value": 0}], ensure_ascii=False)
     fallback_modules = json.dumps(
         [{"name": module["name"], "created": 0, "pending": 0, "abnormal": 0} for module in modules],
         ensure_ascii=False)
-    files[fe / "src/views/Dashboard.tsx"] = render(
-        DASHBOARD_REACT, FALLBACK_CARDS=fallback_cards, FALLBACK_MODULES=fallback_modules)
+    files[fe / "src/views/Dashboard.tsx"] = (
+        DASHBOARD_REACT_LOCAL if frontend_only
+        else render(DASHBOARD_REACT, FALLBACK_CARDS=fallback_cards,
+                    FALLBACK_MODULES=fallback_modules))
     files[fe / "src/App.tsx"] = render(
         APP_REACT, APP_NAME=spec["app_name"], APP_DESC=spec["app_desc"],
         NAV_ITEMS=build_nav_items(modules),
@@ -2333,8 +3206,18 @@ def build_readme(spec: dict) -> str:
         f"{'、'.join(module['fields'][:3])} |"
         for module in modules
     )
-    backend_label = "FastAPI（Python）" if spec["backend"] == "python" else "Spring Boot（Java 17）"
     frontend_label = "Vue 3 + Vite + TypeScript" if spec["frontend"] == "vue" else "React + Vite + TypeScript"
+    module_table = "| 模块 | 目录 | 业务对象 | 主要字段 |\n| --- | --- | --- | --- |\n" + table
+    if spec["backend"] == "none":
+        return render(
+            README_LOCAL,
+            APP_NAME=spec["app_name"], APP_DESC=spec["app_desc"],
+            FRONTEND_LABEL=frontend_label,
+            FRONTEND_PORT=spec["port_frontend"],
+            STORAGE_KEY=f"{spec['app_slug']}:entries",
+            MODULE_TABLE=module_table,
+        )
+    backend_label = "FastAPI（Python）" if spec["backend"] == "python" else "Spring Boot（Java 17）"
     backend_setup = "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
     backend_run = "./run.sh"
     return render(
@@ -2343,26 +3226,36 @@ def build_readme(spec: dict) -> str:
         FRONTEND_LABEL=frontend_label, BACKEND_LABEL=backend_label,
         FRONTEND_PORT=spec["port_frontend"], BACKEND_PORT=spec["port_backend"],
         BACKEND_SETUP=backend_setup, BACKEND_RUN=backend_run,
-        MODULE_TABLE="| 模块 | 目录 | 业务对象 | 主要字段 |\n| --- | --- | --- | --- |\n" + table,
+        MODULE_TABLE=module_table,
     )
+
+
+def repo_kind(spec: dict) -> str:
+    return "frontend-only" if spec["backend"] == "none" else "fullstack"
 
 
 def scaffold(spec: dict, out: Path) -> dict:
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"目标目录非空，先清空或换一个目录：{out}")
     out.mkdir(parents=True, exist_ok=True)
+    frontend_only = spec["backend"] == "none"
     lines = 0
     lines += gen_frontend_vue(spec, out) if spec["frontend"] == "vue" else gen_frontend_react(spec, out)
-    lines += gen_backend_python(spec, out) if spec["backend"] == "python" else gen_backend_java(spec, out)
+    if not frontend_only:
+        lines += gen_backend_python(spec, out) if spec["backend"] == "python" else gen_backend_java(spec, out)
 
     root_files = {
         out / ".gitignore": GITIGNORE,
         out / "README.md": build_readme(spec),
-        out / "docker-compose.yml": render(
-            COMPOSE, BACKEND_PORT=spec["port_backend"], FRONTEND_PORT=spec["port_frontend"]),
-        out / "Makefile": render(
-            MAKEFILE, BACKEND_INSTALL="python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
-            BACKEND_RUN="./run.sh"),
+        out / "docker-compose.yml": (
+            render(COMPOSE_LOCAL, FRONTEND_PORT=spec["port_frontend"]) if frontend_only
+            else render(COMPOSE, BACKEND_PORT=spec["port_backend"],
+                        FRONTEND_PORT=spec["port_frontend"])),
+        out / "Makefile": (
+            MAKEFILE_LOCAL if frontend_only
+            else render(MAKEFILE,
+                        BACKEND_INSTALL="python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
+                        BACKEND_RUN="./run.sh")),
         out / ".env.example": "APP_ENV=local\n",
     }
     for path, content in root_files.items():
@@ -2376,7 +3269,7 @@ def scaffold(spec: dict, out: Path) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="生成一个满足硬性要求的全栈代码仓库")
+    parser = argparse.ArgumentParser(description="生成一个满足硬性要求的代码仓库（全栈或纯前端）")
     target = parser.add_mutually_exclusive_group(required=False)
     target.add_argument("--out", help="输出目录的完整路径（必须为空或不存在）")
     target.add_argument("--parent", help="父目录：按项目编号建 <父目录>/<前缀><5 位数>/<前缀><5 位数>，外层是任务容器、内层才是仓库根，例如 cc10001/cc10001")
@@ -2384,7 +3277,8 @@ def main() -> int:
     parser.add_argument("--check-spec", action="store_true",
                         help="只读 spec、校验格式并扫严禁题域，打印报告后退出，不生成任何目录")
     parser.add_argument("--frontend", choices=["vue", "react"], help="覆盖 spec 里的前端技术栈")
-    parser.add_argument("--backend", choices=["python", "java"], help="覆盖 spec 里的后端技术栈")
+    parser.add_argument("--backend", choices=["python", "java", "none"],
+                        help="覆盖 spec 里的后端技术栈；none = 只生成纯前端仓库")
     parser.add_argument("--prefix", default=DEFAULT_PREFIX,
                         help=f"项目编号前缀，2~4 个字母，默认 {DEFAULT_PREFIX}（大小写按传入的原样用）")
     parser.add_argument("--number", type=int, default=None,
@@ -2413,6 +3307,7 @@ def main() -> int:
             "spec": str(spec_path),
             "app_name": spec["app_name"],
             "modules": len(spec["modules"]),
+            "kind": repo_kind(spec),
             "banned_topic_hits": [],
             "gate_version": rules.GATE_VERSION,
         }, ensure_ascii=False, indent=2))
@@ -2451,7 +3346,9 @@ def main() -> int:
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=out, check=True)
         subprocess.run(["git", "add", "-A"], cwd=out, check=True)
         subprocess.run(["git", "-c", "user.email=repo@example.com", "-c", "user.name=repo",
-                        "commit", "-q", "-m", "chore: 初始化全栈项目骨架"], cwd=out, check=True)
+                        "commit", "-q", "-m",
+                        f"chore: 初始化{'纯前端' if spec['backend'] == 'none' else '全栈'}项目骨架"],
+                       cwd=out, check=True)
 
     print(json.dumps({
         "ok": True,
@@ -2461,6 +3358,7 @@ def main() -> int:
         "app_name": spec["app_name"],
         "frontend": spec["frontend"],
         "backend": spec["backend"],
+        "kind": repo_kind(spec),
         "modules": len(spec["modules"]),
         "files": result["files"],
         "lines_written": result["lines_written"],

@@ -1,13 +1,27 @@
 ---
 name: cc-repo-create
-description: "生成可直接出题、并且能直接交付的全栈代码仓库：前端 Vue 或 React + 后端 Java 或 Python，基础环境自洽（能编译、依赖声明齐、无写死路径）、在干净克隆里真装依赖真起服务真打开页面，前端 dev server 关掉自动打开页面，根目录带覆盖依赖/缓存/构建产物的 .gitignore，源码 >= 2000 行，按「主体 × 需求模式」算出的出题容量 >= 30 条，不含代码理解这类禁用题型。一条链跑到「仓库已经在 GitHub 上」为止（生成 -> 静态验收 -> 干净克隆真启动 -> 建仓库推 main），本地固定落在 <父目录>/<编号>/<编号>/ 两层。自带生成器、静态验收器、干净克隆启动探针、推送脚本与一条命令跑完的驱动（含 React/Java 变体与闸门自测），被单独拿到别的机器也能跑，不依赖任何其他 skill。"
+description: "生成可直接出题、并且能直接交付的代码仓库，两种形态都支持：全栈（前端 Vue 或 React + 后端 Java 或 Python）与纯前端（--backend none，只有 frontend/ + 本地数据层，无后端）。基础环境自洽（能编译、依赖声明齐、无写死路径）、在干净克隆里真装依赖真起服务真打开页面，前端 dev server 关掉自动打开页面，根目录带覆盖依赖/缓存/构建产物的 .gitignore，源码 >= 2000 行，按「主体 × 需求模式」算出的出题容量 >= 30 条，不含代码理解这类禁用题型，题域不命中 0731 严禁出题清单。一条链跑到「仓库已经在 GitHub 上」为止（生成 -> 静态验收 -> 干净克隆真启动 -> 建仓库推 main），本地固定落在 <父目录>/<编号>/<编号>/ 两层。自带生成器、静态验收器、干净克隆启动探针、推送脚本与一条命令跑完的驱动（含 React/Java 变体与闸门自测），被单独拿到别的机器也能跑，不依赖任何其他 skill。关键词：生成仓库、造项目、全栈、纯前端、出题底座、建仓、推 GitHub。"
 ---
 
-# 全栈代码仓库生成（出题底座）
+# 代码仓库生成（出题底座）
 
-给一个题域，生成一个**能起、能看、能出题**的全栈仓库。这个仓库是下游出题的底座：
-每个业务模块都同时有前端页面、后端接口和业务规则三处代码，主体数、行数、需求模式
-覆盖度都按出题容量算好，不用生成完再回头补。
+给一个题域，生成一个**能起、能看、能出题**的仓库。这个仓库是下游出题的底座：
+每个业务模块都同时有前端页面、业务规则与数据来源三处代码（全栈仓库还有后端接口），
+主体数、行数、需求模式覆盖度都按出题容量算好，不用生成完再回头补。
+
+两种形态，都走同一条链：
+
+| 形态 | 怎么开 | 产出 | 数据来源 |
+|---|---|---|---|
+| 全栈（默认） | `--backend python` / `java` | `frontend/` + `backend/` | 后端接口，vite 代理 `/api` |
+| 纯前端 | `--backend none` | 只有 `frontend/` | `frontend/src/data/` 本地数据层 + localStorage |
+
+纯前端仓库不是「把后端删掉」：页面改成直接调 `frontend/src/api/local-service.ts`，
+示例数据在 `frontend/src/data/seed.ts`，模块字段 / 状态 / 流转目标在
+`frontend/src/data/modules.ts`，改动持久化在浏览器 `localStorage` 里。
+形态由 `frontend/package.json` 的 `repoKind` 字段（`fullstack` / `frontend-only`）标记，
+静态验收与真启动探针都读这个字段——**不靠「没有 backend 目录」猜**，
+所以误删后端目录的全栈仓库照样会被 G1 拦下。
 
 `<skill>` 指本 skill 所在目录（本机为 `~/.kunlunxiaozhi/skills/cc-repo-create`）。
 
@@ -17,13 +31,13 @@ description: "生成可直接出题、并且能直接交付的全栈代码仓库
 
 - `python3` → 3.13.12（PATH 上的隔离运行时），`node` v22.22.2、`npm` 10.9.7、`git` 2.50.1 均在 PATH 上，直接写命令名即可，**不要硬编码 `/Users/...` 绝对路径**。
 - `gh` 2.93.0 已登录账号 `fengyin-solo`，推 GitHub 时默认 owner 自动取到它。
-- **本机没有 JDK 17 / Maven**：Java 后端（Spring Boot）只能生成、**无法真启动验收**。本机出题与交付请统一用 `--backend python`（FastAPI）；Java 版的 G8 一律按未验证处理。
+- **本机没有 JDK 17 / Maven**：Java 后端（Spring Boot）只能生成、**无法真启动验收**。本机出题与交付请统一用 `--backend python`（FastAPI）或 `--backend none`（纯前端）；Java 版的 G8 一律按未验证处理。
 - 命令里的路径**带中文或空格必须加双引号**（本机工作目录就含中文和空格）。
 - 真启动探针会联网（`npm install` + `pip install`），离线时 G8 会失败，属环境问题不是仓库问题。
 
 ## 什么时候用
 
-- 用户要给某个题域「生成一个仓库 / 造一个项目 / 做一个全栈 demo」，并且这个仓库后面要出题；
+- 用户要给某个题域「生成一个仓库 / 造一个项目 / 做一个全栈 demo / 做一个纯前端 demo」，并且这个仓库后面要出题；
 - 用户拿到一批任务目录，缺可用底座，要先造几个仓库出来；
 - 用户说「仓库太小 / 出不了 30 条题 / 页面打不开 / 没 .gitignore」这类问题时，用它造合规底座。
 
@@ -34,7 +48,7 @@ description: "生成可直接出题、并且能直接交付的全栈代码仓库
 
 | 闸门 | 要求 |
 |---|---|
-| G1 结构 | 前端 Vue 或 React，后端 Java 或 Python，双端各有依赖清单与启动入口 |
+| G1 结构 | 前端 Vue 或 React，后端 Java 或 Python，双端各有依赖清单与启动入口；**纯前端仓库**（`--backend none`）不要求后端，但必须有本地数据层 `frontend/src/api/local-service.ts` 与 `frontend/src/data/` |
 | G2 启动 | 前端 dev server 关掉「自动打开页面」（Vite 写 `server.open = false`） |
 | G3 忽略 | 根目录 `.gitignore` 覆盖依赖、缓存、构建产物、日志、环境文件、IDE、OS 文件 |
 | G4 体量 | 源码 >= 2000 行（不含依赖目录、构建产物、锁文件） |
@@ -42,9 +56,9 @@ description: "生成可直接出题、并且能直接交付的全栈代码仓库
 | G6 合规 | 不含禁用题型（`代码理解`），无密钥、无超大文件、无违规业务域，**且题域不命中 0731 严禁出题清单** |
 | G7 环境 | 基础环境自洽：Python 全量可编译、后端入口能 import、依赖都声明了、没有写死本机路径 |
 
-外加一道 **G8 真启动**复核：后端真的起来并返回数据、前端页面真的有挂载点、
-从装依赖到关服务全程不拉起浏览器、结束以后进程全停干净。**默认在干净克隆里跑**，
-所以「本地残留让它跑起来」这种假通过不算数。
+外加一道 **G8 真启动**复核：后端真的起来并返回数据（纯前端仓库没有后端，这一步按「跳过」记，不算失败）、
+前端页面真的有挂载点、从装依赖到关服务全程不拉起浏览器、结束以后进程全停干净。
+**默认在干净克隆里跑**，所以「本地残留让它跑起来」这种假通过不算数。
 
 口径细节、容量公式推导、禁用项判据都在 [references/hard-rules.md](references/hard-rules.md)。
 
@@ -64,8 +78,10 @@ python3 <skill>/scripts/run_pipeline.py \
   --publish --confirm PUBLISH
 ```
 
+- 生成形态看 spec 里的 `backend` 字段（或 `--backend python|java|none` 覆盖）：
+  写成 `none` 就出纯前端仓库，后面的静态验收与探针会自动按 `frontend-only` 口径跑。
 - 不加 `--publish` 就是本地预演：生成 + 验收，不碰远端。
-- 每步打印一行进度，最后给一份汇总 JSON（含 `project_id` / `repo_root` / `capacity` /
+- 每步打印一行进度，最后给一份汇总 JSON（含 `project_id` / `repo_root` / `kind` / `capacity` /
   `repo_url` / `visibility_after` / `remote_matches_local`）。
 - 任何一步没过**默认立刻停**，退出码非 0；要硬撑着跑完剩下的 spec 才加 `--keep-going`。
 - 快速通道 `--skip-probe` 只跳过真启动那一步，**交付前不许用**。
@@ -117,11 +133,13 @@ python3 <skill>/scripts/scaffold_repo.py --check-spec --spec /path/to/spec.json
 # 推荐：给一个父目录，按项目编号自动命名（cc10001 / cc10002 / …）
 python3 <skill>/scripts/scaffold_repo.py --parent /path/to/父目录 --spec /path/to/spec.json --git-init
 # 换前缀：--prefix YEL → YEL10001、YEL10002…
-# 换技术栈：--frontend vue|react  --backend python|java
+# 换技术栈：--frontend vue|react  --backend python|java|none
+#   --backend none = 纯前端仓库（只有 frontend/ + 本地数据层，不生成 backend/）
 # 显式给路径（不做编号分配）：--out /path/to/repo
 ```
 
-输出里带 `modules` / `files` / `lines_written`，以及下一步该跑的验收命令。
+输出里带 `modules` / `files` / `lines_written` / `kind`（`fullstack` 或 `frontend-only`），
+以及下一步该跑的验收命令。
 `--git-init` 会顺手 `git init` 并做一次提交，便于后面用 `git check-ignore` 实测忽略规则。
 编号规则见下面「项目编号」一节。
 
@@ -131,6 +149,9 @@ python3 <skill>/scripts/scaffold_repo.py --parent /path/to/父目录 --spec /pat
 <父目录>/cc10001/            ← 任务容器（放探针日志、依赖种子等周边产物）
 <父目录>/cc10001/cc10001/    ← 仓库根：.git / frontend / backend / README.md / .gitignore
 ```
+
+纯前端仓库（`--backend none`）的仓库根里没有 `backend/`，多出来的是
+`frontend/src/api/local-service.ts` 与 `frontend/src/data/{types,modules,seed,local-store}.ts`。
 
 生成结果里 `out` 与 `repo_root` 都是内层那个（仓库根），`project.container` 是外层容器；
 后面 `verify_repo.py` / `probe_startup.py` / `publish_github.py` 的 `--repo` 一律指向**内层**。
@@ -284,8 +305,8 @@ GitHub 仓库名只取编号，不带外层那层，两边不会对不上。
 
 ## 禁用题型
 
-任务类型里的 `代码理解` 是禁用项。仓库侧对应的判据是：前端页面组件 >= 8 个、
-后端接口文件 >= 8 个，且业务代码带真实中文业务文案——只有文档、只有算法片段、
+任务类型里的 `代码理解` 是禁用项。仓库侧对应的判据是：前端页面组件 >= 8 个（纯前端仓库只看这一条）、
+有后端的仓库后端接口文件还要 >= 8 个，且业务代码带真实中文业务文案——只有文档、只有算法片段、
 只有一个入口文件、或者通篇泛词（主体识别派不出 3 条非泛用中文串）的仓库都会被拦下。
 
 ## 主体是怎么派生的（决定了文件必须怎么写）
