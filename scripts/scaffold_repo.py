@@ -896,6 +896,15 @@ body { margin: 0; background: #f6f8fb; color: #1f2937; }
 .link { border: none; background: none; color: var(--brand); cursor: pointer; padding: 0; }
 .page-foot { display: flex; justify-content: space-between; margin-top: 8px; font-size: 12px; color: var(--muted); }
 .error-text { color: #b42318; }
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:1000}
+.modal-card{background:#fff;border-radius:10px;width:420px;max-height:80vh;overflow-y:auto;box-shadow:0 4px 24px rgba(0,0,0,.15)}
+.modal-head{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--border)}
+.modal-head h3{margin:0;font-size:16px}
+.modal-body{padding:18px;display:flex;flex-direction:column;gap:12px}
+.modal-field{display:flex;flex-direction:column;gap:4px}
+.modal-field span{font-size:13px;color:var(--muted)}
+.modal-field input{padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px}
+.modal-foot{display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--border);padding:12px 18px}
 """
 
 VUE_VIEW = """\
@@ -960,6 +969,27 @@ VUE_VIEW = """\
       <span>共 {{ total }} 条__NAME__记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
+
+    <Teleport to="body">
+      <div v-if="showCreateModal" class="modal-overlay" @click.self="showCreateModal = false">
+        <div class="modal-card">
+          <header class="modal-head">
+            <h3>登记__ENTITY__</h3>
+            <button class="btn ghost" type="button" @click="showCreateModal = false">&times;</button>
+          </header>
+          <form class="modal-body" @submit.prevent="submitCreate">
+            <label v-for="field in columns.slice(0, 3)" :key="field" class="modal-field">
+              <span>{{ field }}</span>
+              <input v-model="createFields[field]" :placeholder="`请输入${field}`" required />
+            </label>
+            <footer class="modal-foot">
+              <button class="btn" type="button" @click="showCreateModal = false">取消</button>
+              <button class="btn primary" type="submit">提交登记</button>
+            </footer>
+          </form>
+        </div>
+      </div>
+    </Teleport>
   </section>
 </template>
 
@@ -981,6 +1011,15 @@ const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+const showCreateModal = ref(false)
+const createFields = ref<Record<string, string>>({})
+
+function updateStats() {
+  const data = rows.value
+  stats.length > 0 && (stats[0].value = data.filter((r: Row) => r.status === statuses[1] || r.pending).length)
+  stats.length > 1 && (stats[1].value = data.filter((r: Row) => r.status && !r.pending && !r.abnormal).length)
+  stats.length > 2 && (stats[2].value = data.filter((r: Row) => r.abnormal).length)
+}
 
 function resetFilters() {
   filters.value = {}
@@ -992,7 +1031,27 @@ function exportRows() {
 }
 
 function openCreate() {
-  errorMessage.value = '__ENTITY__登记入口尚未接入审批流'
+  errorMessage.value = ''
+  createFields.value = {}
+  showCreateModal.value = true
+}
+
+async function submitCreate() {
+  errorMessage.value = ''
+  try {
+    const response = await request(ENDPOINT, {
+      method: 'POST',
+      body: JSON.stringify({ values: createFields.value }),
+    })
+    if (!response.ok) {
+      const data = await response.json()
+      throw new Error(data.message || '登记失败')
+    }
+    showCreateModal.value = false
+    await reload()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '登记失败'
+  }
 }
 
 async function runAction(action: string, row: Row) {
@@ -1000,7 +1059,7 @@ async function runAction(action: string, row: Row) {
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
     if (!response.ok) {
       throw new Error('__NAME__动作未生效，请稍后重试')
@@ -1022,6 +1081,7 @@ async function reload() {
     const payload = await response.json()
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    updateStats()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '__NAME__列表读取失败'
   }
@@ -1076,7 +1136,7 @@ export default function __CLASS__View() {
     try {
       const response = await request(`${ENDPOINT}/${row.id}/actions`, {
         method: 'POST',
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ values: { action } }),
       })
       if (!response.ok) {
         throw new Error('__NAME__动作未生效，请稍后重试')

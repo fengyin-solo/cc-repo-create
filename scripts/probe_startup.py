@@ -29,8 +29,23 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
+
+# 常见状态词，给筛选接口用：从 router 里找不到状态列表时兜底
+STATUS_HINTS = {
+    "certification": "审核中",
+    "seedling": "育苗中",
+    "planting": "已定植",
+    "fertilizer": "已施用",
+    "pest": "防治中",
+    "task": "执行中",
+    "harvest": "采收中",
+    "sorting": "分拣中",
+    "packaging": "包装中",
+    "irrigation": "执行中",
+}
 
 
 def free_port(preferred: int) -> int:
@@ -379,6 +394,87 @@ def main() -> int:
                     record("后端业务接口可访问", status == 200 and "items" in body,
                            f"{endpoint} status={status} body={body[:200]}"
                            + ("" if len(endpoints) <= 1 else f"（共试了 {len(endpoints)} 个候选）"))
+
+                    # ---- 交互功能验证：筛选、动作、登记、导出 ----
+                    if ready and endpoints:
+                        test_endpoint = next((e for e in endpoints if e != "/api/health"), endpoints[0])
+
+                        # 1. 筛选
+                        test_url = f"{base}{test_endpoint}?status={urllib.parse.quote(STATUS_HINTS.get(test_endpoint.split('/')[-1], ''))}"
+                        f_status, f_body = http_get(test_url)
+                        item_count = f_body.count('"id"')
+                        record("交互验证-筛选接口", f_status == 200,
+                               f"GET {test_endpoint}?status=... -> {f_status} items={item_count}")
+
+                        # 2. 导出
+                        export_url = f"{base}{test_endpoint}/export"
+                        e_status, e_body = http_get(export_url)
+                        has_module_field = '"module"' in e_body
+                        record("交互验证-导出接口", e_status == 200 and has_module_field,
+                               f"GET {test_endpoint}/export -> {e_status} has_module={has_module_field}")
+
+                        # 3. 动作：取第一条做动作
+                        import json as _json
+                        try:
+                            items_data = _json.loads(f_body)
+                            first_item = items_data.get("items", [{}])[0] if items_data else {}
+                        except Exception:
+                            first_item = {}
+                        item_id = first_item.get("id")
+                        if item_id:
+                            action_candidates = ["提交申请", "开始育苗", "确认虫害", "完成布置", "安排试镜",
+                                                 "下发通告", "签约场地", "借出道具", "开始制作", "办理入门",
+                                                 "录入数据", "确认调配", "安排入住", "开始备餐", "确认指派",
+                                                 "开始训练", "安排交流", "提交申报", "发布招生", "确认资助",
+                                                 "审核通过", "确认完成", "开始授课"]
+                            action_ok = False
+                            action_detail = ""
+                            for action in action_candidates:
+                                act_body = _json.dumps({"values": {"action": action}}).encode()
+                                try:
+                                    req = urllib.request.Request(
+                                        f"{base}{test_endpoint}/{item_id}/actions",
+                                        data=act_body,
+                                        headers={"Content-Type": "application/json"},
+                                        method="POST")
+                                    with urllib.request.urlopen(req, timeout=5) as resp:
+                                        act_resp = _json.loads(resp.read().decode())
+                                        if act_resp.get("ok"):
+                                            action_ok = True
+                                            action_detail = f"action={action} -> ok"
+                                            break
+                                        else:
+                                            action_detail = f"action={action} -> {act_resp.get('message','')[:60]}"
+                                except Exception as act_err:
+                                    action_detail = f"action={action} -> err: {act_err}"
+                            record("交互验证-动作接口", action_ok, action_detail)
+                        else:
+                            record("交互验证-动作接口", False, "无可用数据项：列表可能为空")
+
+                        # 4. 登记
+                        try:
+                            items_data = _json.loads(f_body) if f_status == 200 else {"items": []}
+                        except Exception:
+                            items_data = {"items": []}
+                        existing_count = len(items_data.get("items", []))
+                        create_payload = _json.dumps({"values": {f"field_{i}": f"probe-test-{i}" for i in range(3)}}).encode()
+                        try:
+                            req = urllib.request.Request(
+                                f"{base}{test_endpoint}",
+                                data=create_payload,
+                                headers={"Content-Type": "application/json"},
+                                method="POST")
+                            with urllib.request.urlopen(req, timeout=5) as resp:
+                                create_resp = _json.loads(resp.read().decode())
+                                create_ok = create_resp.get("ok", False)
+                                create_msg = create_resp.get("message", "")[:80]
+                        except Exception as create_err:
+                            create_ok = False
+                            create_msg = str(create_err)[:80]
+                        record("交互验证-登记接口", create_ok,
+                               f"POST {test_endpoint} -> ok={create_ok} {create_msg[:60]}")
+                    else:
+                        record("交互验证-筛选", False, "后端未就绪或无业务接口")
         elif backend["kind"] == "java":
             if shutil.which("mvn") is None or shutil.which("java") is None:
                 record("Java 后端启动", False,
