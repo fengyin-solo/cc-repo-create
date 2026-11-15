@@ -2232,7 +2232,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.schemas import ActionResult, EntryPayload, PageResult
 from app.services.__KEY__ import __CLASS__Service
@@ -2245,8 +2245,16 @@ LIST_FIELDS = __FIELDS__
 STATUSES = __STATUSES__
 
 
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出__NAME__清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "__KEY__", "total": total, "items": items}
+
+
 @router.get("", response_model=PageResult[dict])
 def list_entries(
+    request: Request,
     keyword: str | None = Query(default=None, description="按__FIELD0__检索"),
     status: str | None = Query(default=None, description="__STATUS_JOIN__"),
     page: int = 1,
@@ -2255,7 +2263,8 @@ def list_entries(
     """按__FIELD0__与状态过滤__NAME__列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    extra = {k: v for k, v in request.query_params.items() if k not in ("keyword", "status", "page", "size") and v.strip()}
+    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size, extra=extra)
     return PageResult(items=items, total=total, page=page, size=size)
 
 
@@ -2285,13 +2294,6 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出__NAME__清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "__KEY__", "total": total, "items": items}
 '''
 
 SERVICE_PY = '''\
@@ -2317,12 +2319,16 @@ class __CLASS__Service:
         status: str | None = None,
         page: int = 1,
         size: int = 20,
+        extra: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         rows = store.rows(MODULE)
         if keyword:
             rows = [row for row in rows if keyword in str(row.get("__FIELD0__", ""))]
         if status:
             rows = [row for row in rows if row.get("status") == status]
+        if extra:
+            for field, val in extra.items():
+                rows = [row for row in rows if val in str(row.get(field, ""))]
         total = len(rows)
         start = max(page - 1, 0) * size
         return rows[start:start + size], total
