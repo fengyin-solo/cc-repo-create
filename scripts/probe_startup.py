@@ -457,14 +457,12 @@ def main() -> int:
                         except Exception:
                             items_data = {"items": []}
                         existing_count = len(items_data.get("items", []))
-                        # 从第一条数据里偷字段名来构造登记 payload
-                        real_fields = list(first_item.keys())[:3] if first_item else []
+                        real_fields = [k for k in first_item if k not in ("id", "status", "pending", "abnormal")] if first_item else []
                         create_values = {}
-                        if len(real_fields) >= 3:
-                            for i, f in enumerate(real_fields):
-                                if f not in ("id", "status", "pending", "abnormal"):
-                                    create_values[f] = f"probe-test-{i}"
-                        # 兜底：如果偷不到 3 个字段，用通用名称
+                        for i, f in enumerate(real_fields):
+                            if i >= 3:
+                                break
+                            create_values[f] = f"probe-{i}"
                         if len(create_values) < 3:
                             create_values = {f"field_{i}": f"probe-test-{i}" for i in range(3)}
                         create_payload = _json.dumps({"values": create_values}).encode()
